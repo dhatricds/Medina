@@ -1,0 +1,54 @@
+[project]
+name = "medina"
+version = "0.1.0"
+description = "Lighting Fixture Inventory Extraction from Electrical Construction PDFs"
+requires-python = ">=3.11"
+dependencies = [
+    "pdfplumber>=0.10",
+    "PyMuPDF>=1.23",
+    "openpyxl>=3.1",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "click>=8.1",
+    "anthropic>=0.40",
+    "Pillow>=10.0",
+    "pytesseract>=0.3",
+    "streamlit>=1.30",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+    "jupyter>=1.0",
+    "ipykernel>=6.0",
+]
+api = [
+    "fastapi>=0.108",
+    "uvicorn[standard]>=0.25",
+    "python-multipart>=0.0.6",
+    "sse-starlette>=1.8",
+]
+
+[project.scripts]
+medina = "medina.cli:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow",
+    "requires_api_key: requires Anthropic API key",
+]

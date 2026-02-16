@@ -1,0 +1,369 @@
+"""Page type classification using sheet index, code prefixes, and content."""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import Any
+
+from medina.models import PageInfo, PageType, SheetIndexEntry
+
+logger = logging.getLogger(__name__)
+
+# Sheet-code prefix rules for fallback classification.
+# Each entry: (regex pattern, default type, disambiguation keywords)
+_PREFIX_RULES: list[
+    tuple[re.Pattern[str], PageType, dict[str, PageType]]
+] = [
+    # E0xx — symbols/legend by default
+    (
+        re.compile(r"^E0", re.IGNORECASE),
+        PageType.SYMBOLS_LEGEND,
+        {},
+    ),
+    # CS — cover sheet
+    (
+        re.compile(r"^CS$", re.IGNORECASE),
+        PageType.COVER,
+        {},
+    ),
+    # E1xx — could be lighting or demolition, check content
+    (
+        re.compile(r"^E1", re.IGNORECASE),
+        PageType.LIGHTING_PLAN,
+        {
+            "demo": PageType.DEMOLITION_PLAN,
+            "demolition": PageType.DEMOLITION_PLAN,
+        },
+    ),
+    # E2xx — lighting plan (but check for power/demolition/signal)
+    (
+        re.compile(r"^E2", re.IGNORECASE),
+        PageType.LIGHTING_PLAN,
+        {
+            "power": PageType.POWER_PLAN,
+            "signal": PageType.OTHER,
+            "demo": PageType.DEMOLITION_PLAN,
+            "demolition": PageType.DEMOLITION_PLAN,
+        },
+    ),
+    # E3xx — power plan (but may be lighting in some projects)
+    (
+        re.compile(r"^E3", re.IGNORECASE),
+        PageType.POWER_PLAN,
+        {
+            "lighting": PageType.LIGHTING_PLAN,
+        },
+    ),
+    # E4xx — often power or misc
+    (
+        re.compile(r"^E4", re.IGNORECASE),
+        PageType.POWER_PLAN,
+        {},
+    ),
+    # E5xx, E6xx, E7xx — schedule (but check for non-schedule pages)
+    (
+        re.compile(r"^E[567]", re.IGNORECASE),
+        PageType.SCHEDULE,
+        {
+            "roof": PageType.OTHER,
+            "riser": PageType.RISER,
+        },
+    ),
+    # E8xx — detail
+    (
+        re.compile(r"^E8", re.IGNORECASE),
+        PageType.DETAIL,
+        {},
+    ),
+]
+
+# Content keywords for deepest-fallback classification.
+_CONTENT_KEYWORDS: list[tuple[list[str], PageType]] = [
+    (
+        [
+            "luminaire schedule",
+            "light fixture schedule",
+            "lighting schedule",
+            "fixture schedule",
+        ],
+        PageType.SCHEDULE,
+    ),
+    (
+        ["lighting plan", "lighting layout"],
+        PageType.LIGHTING_PLAN,
+    ),
+    (
+        ["demolition plan", "demolition layout", "demo plan"],
+        PageType.DEMOLITION_PLAN,
+    ),
+    (
+        [
+            "power plan",
+            "power layout",
+            "receptacle plan",
+        ],
+        PageType.POWER_PLAN,
+    ),
+    (
+        [
+            "electrical symbols",
+            "abbreviations",
+            "legend",
+        ],
+        PageType.SYMBOLS_LEGEND,
+    ),
+    (
+        ["site plan", "site layout"],
+        PageType.SITE_PLAN,
+    ),
+    (["fire alarm"], PageType.FIRE_ALARM),
+    (["riser diagram", "riser schedule"], PageType.RISER),
+    (["detail"], PageType.DETAIL),
+]
+
+# Keywords that indicate a non-luminaire schedule (exclude).
+_SCHEDULE_EXCLUDE = {
+    "panel schedule",
+    "motor schedule",
+    "equipment schedule",
+    "floorbox",
+    "poke thru",
+}
+
+
+def classify_pages(
+    pages: list[PageInfo],
+    pdf_pages: dict[int, Any],
+    sheet_index: list[SheetIndexEntry],
+) -> list[PageInfo]:
+    """Classify each page using sheet index, code prefixes, and content.
+
+    Mutates and returns the same PageInfo list with ``page_type``
+    updated.
+
+    Args:
+        pages: List of loaded PageInfo objects.
+        pdf_pages: Dict mapping page_number to pdfplumber page.
+        sheet_index: Parsed sheet index entries (may be empty).
+
+    Returns:
+        The same list of PageInfo objects with page_type set.
+    """
+    # Build a lookup from sheet code to inferred type.
+    index_lookup: dict[str, PageType] = {}
+    for entry in sheet_index:
+        if entry.inferred_type is not None:
+            index_lookup[entry.sheet_code.upper()] = (
+                entry.inferred_type
+            )
+
+    for page in pages:
+        page_type = _classify_single(
+            page, pdf_pages.get(page.page_number), index_lookup
+        )
+        page.page_type = page_type
+        logger.debug(
+            "Page %d (%s) classified as %s",
+            page.page_number,
+            page.sheet_code,
+            page_type.value,
+        )
+
+    return pages
+
+
+def _classify_single(
+    page: PageInfo,
+    pdfp_page: Any | None,
+    index_lookup: dict[str, PageType],
+) -> PageType:
+    """Classify a single page through the priority chain."""
+    code_upper = (page.sheet_code or "").upper()
+
+    # Priority 1: Sheet index hints
+    if code_upper and code_upper in index_lookup:
+        logger.debug(
+            "Page %d: classified via sheet index → %s",
+            page.page_number,
+            index_lookup[code_upper].value,
+        )
+        return index_lookup[code_upper]
+
+    # Priority 2: Title block content (most reliable self-description)
+    if pdfp_page is not None:
+        result = _classify_from_title_block(pdfp_page)
+        if result is not None:
+            return result
+
+    # Also check the sheet title from the index.
+    title_text = (page.sheet_title or "").lower()
+
+    # Priority 3: Sheet code prefix rules
+    if code_upper:
+        result = _classify_by_prefix(code_upper, title_text)
+        if result is not None:
+            return result
+
+    # Priority 4: Full-page content keyword scan
+    if pdfp_page is not None:
+        result = _classify_by_content(pdfp_page)
+        if result is not None:
+            return result
+
+    return PageType.OTHER
+
+
+def _classify_by_prefix(
+    code: str,
+    title_hint: str,
+) -> PageType | None:
+    """Classify using sheet code prefix rules."""
+    for pattern, default_type, disambiguators in _PREFIX_RULES:
+        if pattern.match(code):
+            # Check disambiguation keywords in the title.
+            for keyword, alt_type in disambiguators.items():
+                if keyword in title_hint:
+                    return alt_type
+            return default_type
+    return None
+
+
+def _classify_by_content(page: Any) -> PageType | None:
+    """Classify by scanning the page text for keywords.
+
+    Uses a two-pass approach:
+    1. Check the TITLE BLOCK area (bottom-right) for the page's own
+       title/description — this is the most reliable indicator.
+    2. Fall back to full-page text scan if the title block didn't match.
+
+    This prevents misclassification when a lighting plan page
+    references "SEE SHEET xxx FOR LIGHT FIXTURE SCHEDULE".
+    """
+    # --- Pass 1: Title block classification ---
+    title_type = _classify_from_title_block(page)
+    if title_type is not None:
+        return title_type
+
+    # --- Pass 2: Full-page text scan ---
+    try:
+        text = page.extract_text() or ""
+    except Exception:
+        return None
+
+    if not text:
+        return None
+
+    text_lower = text.lower()
+
+    # Remove cross-reference notes that mention other pages' schedules.
+    # These often span multiple lines, e.g.:
+    #   "REFER TO SHEET FOR FE-10691-012 FOR PANEL BOARD
+    #    SCHEDULE AND LIGHTING FIXTURE SCHEDULE."
+    # Collapse newlines first so the regex can match across lines.
+    import re
+    text_collapsed = text_lower.replace("\n", " ")
+    text_no_crossref = re.sub(
+        r"(?:see|refer\s+to)\s+(?:sheet\s+)?(?:for\s+)?"
+        r".{0,120}schedule[^.]*\.?",
+        "",
+        text_collapsed,
+    )
+
+    for keywords, page_type in _CONTENT_KEYWORDS:
+        if any(kw in text_no_crossref for kw in keywords):
+            return page_type
+
+    return None
+
+
+def _classify_from_title_block(page: Any) -> PageType | None:
+    """Classify a page by its title block description.
+
+    The title block (bottom-right ~25% of the page) contains the
+    page's actual title. This is more reliable than full-page text
+    which may contain cross-references to other pages.
+    """
+    width = page.width
+    height = page.height
+
+    # Crop to title block area (bottom-right)
+    bbox = (
+        width * 0.55,
+        height * 0.80,
+        width,
+        height,
+    )
+    try:
+        cropped = page.within_bbox(bbox)
+        raw_text = cropped.extract_text() or ""
+        # Collapse newlines to spaces so multi-line titles
+        # like "ELECTRICAL SITE\nPLAN" match "site plan".
+        title_text = " ".join(raw_text.lower().split())
+    except Exception:
+        return None
+
+    if not title_text:
+        return None
+
+    # Check title block text for page type keywords.
+    # Use the same keyword list but check against the title specifically.
+    # Important: check in priority order — demolition before lighting.
+    _TITLE_KEYWORDS: list[tuple[list[str], PageType]] = [
+        (["demolition", "demo plan"], PageType.DEMOLITION_PLAN),
+        (
+            ["site plan", "site layout", "photometric"],
+            PageType.SITE_PLAN,
+        ),
+        (
+            ["roof electrical plan", "electrical roof plan"],
+            PageType.OTHER,
+        ),
+        (
+            [
+                "panel schedule", "panelboard schedule",
+            ],
+            PageType.SCHEDULE,
+        ),
+        (
+            ["security plan", "technology plan"],
+            PageType.FIRE_ALARM,
+        ),
+        (["lighting plan", "lighting layout",
+          "electrical lighting plan"], PageType.LIGHTING_PLAN),
+        (
+            [
+                "luminaire schedule",
+                "light fixture schedule",
+                "lighting schedule",
+                "fixture schedule",
+                "electrical schedules",
+            ],
+            PageType.SCHEDULE,
+        ),
+        (
+            ["electrical symbols", "abbreviation", "legend"],
+            PageType.SYMBOLS_LEGEND,
+        ),
+        (
+            ["enlarged electrical room", "electrical room plan"],
+            PageType.OTHER,
+        ),
+        (
+            [
+                "power plan", "power layout",
+                "electrical plan",
+            ],
+            PageType.POWER_PLAN,
+        ),
+        (["fire alarm"], PageType.FIRE_ALARM),
+        (["riser diagram", "riser"], PageType.RISER),
+        (["detail"], PageType.DETAIL),
+        (["cover sheet", "title sheet", "coversheet"], PageType.COVER),
+    ]
+
+    for keywords, page_type in _TITLE_KEYWORDS:
+        if any(kw in title_text for kw in keywords):
+            return page_type
+
+    return None

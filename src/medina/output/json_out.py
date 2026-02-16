@@ -1,0 +1,97 @@
+"""JSON output generation for frontend display."""
+
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+
+from medina.models import ExtractionResult
+
+logger = logging.getLogger(__name__)
+
+
+def build_json_output(result: ExtractionResult) -> dict:
+    """Build the structured JSON output dict for frontend consumption."""
+    sheet_index_data = [
+        {
+            "sheet_code": entry.sheet_code,
+            "description": entry.description,
+            "type": entry.inferred_type.value if entry.inferred_type else "other",
+        }
+        for entry in result.sheet_index
+    ]
+
+    fixtures_data = [
+        {
+            "code": f.code,
+            "description": f.description,
+            "fixture_style": f.fixture_style,
+            "voltage": f.voltage,
+            "mounting": f.mounting,
+            "lumens": f.lumens,
+            "cct": f.cct,
+            "dimming": f.dimming,
+            "max_va": f.max_va,
+            "counts_per_plan": f.counts_per_plan,
+            "total": f.total,
+        }
+        for f in result.fixtures
+    ]
+
+    keynotes_data = [
+        {
+            "keynote_number": str(kn.number),
+            "keynote_text": kn.text,
+            "counts_per_plan": kn.counts_per_plan,
+            "total": kn.total,
+            "fixture_references": kn.fixture_references,
+        }
+        for kn in result.keynotes
+    ]
+
+    total_fixtures = sum(f.total for f in result.fixtures)
+
+    qa_data = None
+    if result.qa_report:
+        qa_data = {
+            "overall_confidence": result.qa_report.overall_confidence,
+            "passed": result.qa_report.passed,
+            "threshold": result.qa_report.threshold,
+            "stage_scores": result.qa_report.stage_scores,
+            "warnings": result.qa_report.warnings,
+            "recommendations": result.qa_report.recommendations,
+        }
+
+    return {
+        "project_name": result.source,
+        "sheet_index": sheet_index_data,
+        "lighting_plans": result.plan_pages,
+        "schedule_pages": result.schedule_pages,
+        "fixtures": fixtures_data,
+        "keynotes": keynotes_data,
+        "summary": {
+            "total_fixture_types": len(result.fixtures),
+            "total_fixtures": total_fixtures,
+            "total_lighting_plans": len(result.plan_pages),
+            "total_keynotes": len(result.keynotes),
+        },
+        "qa_report": qa_data,
+    }
+
+
+def write_json(
+    result: ExtractionResult,
+    output_path: str | Path,
+) -> Path:
+    """Generate the JSON output file."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    data = build_json_output(result)
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+    logger.info("JSON output saved to %s", output_path)
+    return output_path

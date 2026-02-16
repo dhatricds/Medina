@@ -1,0 +1,205 @@
+{
+  "project_name": "Extracted from 1. Anoka Dispensary Drawings",
+  "sheet_index": [],
+  "lighting_plans": [
+    "E301"
+  ],
+  "schedule_pages": [
+    "E901"
+  ],
+  "fixtures": [
+    {
+      "code": "A",
+      "description": "UV RESISTANT ACRYLIC LENS, HOUSING DEPTH LESS THAN 1\", OVERALL DEPTH WITH DRIVER LESS THAN 2\", EDGE LIT LED, IC RATED",
+      "fixture_style": "",
+      "voltage": "120 V",
+      "mounting": "RECESSED",
+      "lumens": "4,000-5,000 LUMENS, 80CRI MIN",
+      "cct": "4000K",
+      "dimming": "",
+      "max_va": "34 W",
+      "counts_per_plan": {
+        "E301": 17
+      },
+      "total": 17
+    },
+    {
+      "code": "B",
+      "description": "6\" LED RECESSED DOWNLIGHT",
+      "fixture_style": "",
+      "voltage": "120 V",
+      "mounting": "B",
+      "lumens": "1500 LUMENS",
+      "cct": "4000K",
+      "dimming": "",
+      "max_va": "16 W",
+      "counts_per_plan": {
+        "E301": 11
+      },
+      "total": 11
+    },
+    {
+      "code": "C",
+      "description": "WALL MOUNT RESTROOM VANITY FIXTURE",
+      "fixture_style": "",
+      "voltage": "120 V",
+      "mounting": "C",
+      "lumens": "3000 LUMENS",
+      "cct": "4000K",
+      "dimming": "",
+      "max_va": "30 W",
+      "counts_per_plan": {
+        "E301": 3
+      },
+      "total": 3
+    },
+    {
+      "code": "D",
+      "description": "LINEAR LED CONTINOUS PENDANT MOUNT FIXTURE",
+      "fixture_style": "",
+      "voltage": "120 V",
+      "mounting": "PENDANT",
+      "lumens": "6000 LUMENS",
+      "cct": "4000K",
+      "dimming": "",
+      "max_va": "45 W",
+      "counts_per_plan": {
+        "E301": 9
+      },
+      "total": 9
+    },
+    {
+      "code": "D1",
+      "description": "LINEAR LED CONTINOUS PENDANT MOUNT FIXTURE",
+      "fixture_style": "",
+      "voltage": "120 V",
+      "mounting": "PENDANT",
+      "lumens": "6000 LUMENS",
+      "cct": "4000K",
+      "dimming": "",
+      "max_va": "20 W",
+      "counts_per_plan": {
+        "E301": 1
+      },
+      "total": 1
+    },
+    {
+      "code": "EG",
+      "description": "EXTERIOR WALL MOUNT LED AREA LIGHT",
+      "fixture_style": "",
+      "voltage": "120 V",
+      "mounting": "WALL MOUNT",
+      "lumens": "LED 500 LUMENS",
+      "cct": "3000K",
+      "dimming": "",
+      "max_va": "55 W",
+      "counts_per_plan": {
+        "E301": 1
+      },
+      "total": 1
+    },
+    {
+      "code": "EX",
+      "description": "THERMOPLASTIC IMPACT RESISTANT, SCRATCH RESISTANT, NICKEL-CADMIUM BATTERY. DUAL-HEAD EXIT SIGN, WITH (1) REMOTE HEAD, SELF DIAGNOSTICS.",
+      "fixture_style": "",
+      "voltage": "120 V",
+      "mounting": "UNIVERSAL",
+      "lumens": "LED",
+      "cct": "",
+      "dimming": "",
+      "max_va": "4 W",
+      "counts_per_plan": {
+        "E301": 4
+      },
+      "total": 4
+    },
+    {
+      "code": "F",
+      "description": "COMPACT LINEAR METAL CHANNEL, FROSTED WRAPPED ROUND DIFFUSE LENS.",
+      "fixture_style": "",
+      "voltage": "120 V",
+      "mounting": "SURFACE/CEILING",
+      "lumens": "LED 5,000-5,500 LUMENS, 80CRI MIN",
+      "cct": "4000K",
+      "dimming": "",
+      "max_va": "32 W",
+      "counts_per_plan": {
+        "E301": 7
+      },
+      "total": 7
+    },
+    {
+      "code": "W1",
+      "description": "EXTERIOR WALL MOUNT LED AREA LIGHT",
+      "fixture_style": "",
+      "voltage": "120 V",
+      "mounting": "WALL MOUNT",
+      "lumens": "LED 8000 LUMENS",
+      "cct": "3000K",
+      "dimming": "",
+      "max_va": "55 W",
+      "counts_per_plan": {
+        "E301": 4
+      },
+      "total": 4
+    },
+    {
+      "code": "W2",
+      "description": "EXTERIOR WALL MOUNT LED AREA LIGHT",
+      "fixture_style": "",
+      "voltage": "120 V",
+      "mounting": "WALL MOUNT",
+      "lumens": "LED 2000 LUMENS",
+      "cct": "3000K",
+      "dimming": "",
+      "max_va": "7 W",
+      "counts_per_plan": {
+        "E301": 2
+      },
+      "total": 2
+    }
+  ],
+  "keynotes": [
+    {
+      "keynote_number": "1",
+      "keynote_text": "CIRCUIT FIXTURE TO UNSWITCH LEG.",
+      "counts_per_plan": {
+        "E301": 4
+      },
+      "total": 4,
+      "fixture_references": []
+    },
+    {
+      "keynote_number": "2",
+      "keynote_text": "CIRCUIT BATTERY PACK TO UNSWITCH LEG. ARCHITECTS, LTD.",
+      "counts_per_plan": {
+        "E301": 1
+      },
+      "total": 1,
+      "fixture_references": []
+    }
+  ],
+  "summary": {
+    "total_fixture_types": 10,
+    "total_fixtures": 59,
+    "total_lighting_plans": 1,
+    "total_keynotes": 2
+  },
+  "qa_report": {
+    "overall_confidence": 0.97,
+    "passed": true,
+    "threshold": 0.95,
+    "stage_scores": {
+      "sheet_index": 0.85,
+      "schedule_extraction": 0.995,
+      "fixture_counting": 0.985,
+      "keynote_extraction": 1.0
+    },
+    "warnings": [
+      "Fixture D1: found only 1 time — verify",
+      "Fixture EG: found only 1 time — verify",
+      "No sheet index found — relying on fallback"
+    ],
+    "recommendations": []
+  }
+}

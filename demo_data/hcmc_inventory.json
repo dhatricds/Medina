@@ -1,0 +1,304 @@
+{
+  "project_name": "24031_15_Elec",
+  "sheet_index": [
+    {
+      "sheet_code": "E000",
+      "description": "ELECTRICAL SYMBOLS AND ABBREVIATIONS",
+      "type": "symbols_legend"
+    },
+    {
+      "sheet_code": "E100",
+      "description": "DEMOLITION LIGHTING PLAN - PARTIAL LOWER LEVEL",
+      "type": "demolition_plan"
+    },
+    {
+      "sheet_code": "E101",
+      "description": "DEMOLITION POWER PLAN - PARTIAL LOWER LEVEL",
+      "type": "demolition_plan"
+    },
+    {
+      "sheet_code": "E102",
+      "description": "DEMOLITION SIGNAL PLAN - PARTIAL LOWER LEVEL",
+      "type": "demolition_plan"
+    },
+    {
+      "sheet_code": "E200",
+      "description": "LIGHTING PLAN - PARTIAL LOWER LEVEL",
+      "type": "lighting_plan"
+    },
+    {
+      "sheet_code": "E300",
+      "description": "POWER PLAN - PARTIAL LOWER LEVEL",
+      "type": "power_plan"
+    },
+    {
+      "sheet_code": "E303",
+      "description": "POWER PLAN - PARTIAL SEVENTH LEVEL INTERSTITIAL",
+      "type": "power_plan"
+    },
+    {
+      "sheet_code": "E400",
+      "description": "SIGNAL PLAN - PARTIAL LOWER LEVEL",
+      "type": "other"
+    },
+    {
+      "sheet_code": "E600",
+      "description": "LIGHT FIXTURE AND ELECTRICAL SCHEDULES",
+      "type": "schedule"
+    }
+  ],
+  "lighting_plans": [
+    "E200"
+  ],
+  "schedule_pages": [
+    "E600"
+  ],
+  "fixtures": [
+    {
+      "code": "A1",
+      "description": "SPRING LATCHES, POST PAINTED STEEL HOUSING, FLUSH ALUM. MITERED CORNERED DOOR FRAME, GASKETED AND/OR WITH METAL LIGHT BAFFLES, DOOR CAN BE LATCHED FROM EITHER SIDE OF HOUSING",
+      "fixture_style": "2X4 LED LENSED TROFFER",
+      "voltage": "120/277",
+      "mounting": "LAY-IN GRID INVERTED TEE",
+      "lumens": "LED 5000 LUM MIN",
+      "cct": "4000K",
+      "dimming": "DIMMING 0-10V (10%)",
+      "max_va": "50 VA",
+      "counts_per_plan": {
+        "E200": 46
+      },
+      "total": 46
+    },
+    {
+      "code": "A6",
+      "description": "POST PAINTED STEEL HOUSING",
+      "fixture_style": "2X4 LED VOLUMETRIC TROFFER",
+      "voltage": "120/277",
+      "mounting": "LAY-IN GRID INVERTED TEE",
+      "lumens": "LED 5000 LUM MIN",
+      "cct": "4000K",
+      "dimming": "DIMMING 0-10V (10%)",
+      "max_va": "50 VA",
+      "counts_per_plan": {
+        "E200": 14
+      },
+      "total": 14
+    },
+    {
+      "code": "B1",
+      "description": "SPRING LATCHES, POST PAINTED STEEL HOUSING, FLUSH WHITE ALUM. MITERED CORNERED DOOR FRAME, GASKETED AND/OR WITH METAL LIGHT BAFFLES, DOOR CAN BE LATCHED FROM EITHER SIDE OF HOUSING",
+      "fixture_style": "2X2 LED LENSED TROFFER",
+      "voltage": "120/277",
+      "mounting": "LAY-IN GRID INVERTED TEE",
+      "lumens": "LED 4000 LUM MIN",
+      "cct": "4000K",
+      "dimming": "DIMMING 0-10V (10%)",
+      "max_va": "30 VA",
+      "counts_per_plan": {
+        "E200": 4
+      },
+      "total": 4
+    },
+    {
+      "code": "B6",
+      "description": "SPRING LATCHES, POST PAINTED STEEL HOUSING, FLUSH WHITE ALUM. MITERED CORNERED DOOR FRAME, GASKETED",
+      "fixture_style": "2X2 LED VOLUMETRIC TROFFER",
+      "voltage": "120/277",
+      "mounting": "LAY-IN GRID INVERTED TEE",
+      "lumens": "LED 4000 LUM MIN",
+      "cct": "4000K",
+      "dimming": "DIMMING 0-10V (10%)",
+      "max_va": "40 VA",
+      "counts_per_plan": {
+        "E200": 26
+      },
+      "total": 26
+    },
+    {
+      "code": "C4",
+      "description": "CYLINDER VANITY FIXTURE WITH BRUSHED NICKEL HOUSING",
+      "fixture_style": "24\" VANITY SCONCE LED",
+      "voltage": "120/277",
+      "mounting": "WALL",
+      "lumens": "LED 1300 LUM MIN",
+      "cct": "4000K",
+      "dimming": "DIMMING 0-10V (10%)",
+      "max_va": "20 VA",
+      "counts_per_plan": {
+        "E200": 1
+      },
+      "total": 1
+    },
+    {
+      "code": "D6",
+      "description": "PRE-PAINTED WHITE ALUMINUM HOUSING, PRE-WIRED J-BOX, TWO 27\" HANGER BARS",
+      "fixture_style": "6\" ROUND DOWNLIGHT",
+      "voltage": "120/277",
+      "mounting": "RECESSED GYP-BOARD AND/OR LAY-IN GRID INVERTED TEE",
+      "lumens": "LED 1500 LUM MIN",
+      "cct": "4000K",
+      "dimming": "DIMMING 0-10V (1%)",
+      "max_va": "25 VA",
+      "counts_per_plan": {
+        "E200": 8
+      },
+      "total": 8
+    },
+    {
+      "code": "D7",
+      "description": "PRE-PAINTED WHITE ALUMINUM HOUSING, PRE-WIRED J-BOX, TWO 27\" HANGER BARS, IP66",
+      "fixture_style": "6\" ROUND DOWNLIGHT - WET LOCATION",
+      "voltage": "120/277",
+      "mounting": "RECESSED GYP-BOARD AND/OR LAY-IN GRID INVERTED TEE",
+      "lumens": "LED 1500 LUM MIN",
+      "cct": "4000K",
+      "dimming": "DIMMING 0-10V (1%)",
+      "max_va": "25 VA",
+      "counts_per_plan": {
+        "E200": 1
+      },
+      "total": 1
+    },
+    {
+      "code": "E3",
+      "description": "WHITE FINISH, DIE-CAST ALUMINUM CONSTRUCTION, UNIVERSAL FACEPLATE KIT, MOUNTING PER FLOOR PLAN. AC ONLY UL924",
+      "fixture_style": "EXIT SIGN, SINGLE FACE, DIECAST, AC ONLY",
+      "voltage": "120/277",
+      "mounting": "RECESSED",
+      "lumens": "LED",
+      "cct": "RED",
+      "dimming": "N/A",
+      "max_va": "5 VA",
+      "counts_per_plan": {
+        "E200": 5
+      },
+      "total": 5
+    },
+    {
+      "code": "E4",
+      "description": "WHITE FINISH, DIE-CAST ALUMINUM CONSTRUCTION, UNIVERSAL FACEPLATE KIT, MOUNTING PER FLOOR PLAN. AC ONLY UL924",
+      "fixture_style": "EXIT SIGN, DOUBLE FACE, DIECAST, AC ONLY",
+      "voltage": "120/277",
+      "mounting": "RECESSED",
+      "lumens": "LED",
+      "cct": "RED",
+      "dimming": "N/A",
+      "max_va": "5 VA",
+      "counts_per_plan": {
+        "E200": 4
+      },
+      "total": 4
+    },
+    {
+      "code": "L5",
+      "description": "CONTINUOUS WHITE ALUMINUM HOUSING",
+      "fixture_style": "4\" X 6' RECESSED LINEAR",
+      "voltage": "120/277",
+      "mounting": "LAY-IN GRID INVERTED TEE",
+      "lumens": "LED 250 LUM/FT",
+      "cct": "4000K",
+      "dimming": "DIMMING 0-10V (10%)",
+      "max_va": "20 VA/FT",
+      "counts_per_plan": {
+        "E200": 3
+      },
+      "total": 3
+    },
+    {
+      "code": "U2",
+      "description": "SOLID FRONT, WHITE FINISHED.",
+      "fixture_style": "2' UNDER CABINET LIGHT",
+      "voltage": "120/277",
+      "mounting": "UNDER CABINET",
+      "lumens": "LED 800 LUM MIN",
+      "cct": "4000K",
+      "dimming": "NON-DIMMING",
+      "max_va": "9 VA",
+      "counts_per_plan": {
+        "E200": 2
+      },
+      "total": 2
+    },
+    {
+      "code": "U3",
+      "description": "SOLID FRONT, WHITE FINISHED.",
+      "fixture_style": "3' UNDER CABINET LIGHT",
+      "voltage": "120/277",
+      "mounting": "UNDER CABINET",
+      "lumens": "LED 1200 LUM MIN",
+      "cct": "4000K",
+      "dimming": "NON-DIMMING",
+      "max_va": "19 VA",
+      "counts_per_plan": {
+        "E200": 7
+      },
+      "total": 7
+    },
+    {
+      "code": "U4",
+      "description": "SOLID FRONT, WHITE FINISHED.",
+      "fixture_style": "4' UNDER CABINET LIGHT",
+      "voltage": "120/277",
+      "mounting": "UNDER CABINET",
+      "lumens": "LED 1600 LUM MIN",
+      "cct": "4000K",
+      "dimming": "NON-DIMMING",
+      "max_va": "31 VA",
+      "counts_per_plan": {
+        "E200": 4
+      },
+      "total": 4
+    }
+  ],
+  "keynotes": [
+    {
+      "keynote_number": "1",
+      "keynote_text": "CONNECT TO EXISTING CIRCUIT. UNDER THE LAWS OF THE STATE OF MINNESOTA.",
+      "counts_per_plan": {
+        "E200": 6
+      },
+      "total": 6,
+      "fixture_references": []
+    },
+    {
+      "keynote_number": "2",
+      "keynote_text": "BASE BID: NO DEMOLITION OR NEW WORK ASSOCIATED WITH SPACE OUTLINED SINGLE DASH LINES. SPACE AND LIGHTING ARE EXISTING WILLIAM E. EVANS, PE ADD ALTERNATE #1: PROPOSED AREA OF SPACE REMODEL OUTLINED BY SINGLE-DASHED LINE. PERFORM DEMO AND NEW DATE 11- 2 5 -2025 LIC. NO. 42386 WORK AS SHOWN. THE ARCHITECT SHALL BE DEEMED THE AUTHORS AND",
+      "counts_per_plan": {
+        "E200": 1
+      },
+      "total": 1,
+      "fixture_references": []
+    },
+    {
+      "keynote_number": "3",
+      "keynote_text": "BASE BID: NO DEMOLITION OR NEW WORK ASSOCIATED WITH SPACE OWNERS OF THEIR RESPECTIVE INSTRUMENTS OF OUTLINED SINGLE DASH LINES. SPACE AND LIGHTING ARE EXISTING SERVICE AND SHALL RETAIN ALL COMMON LAW, STATUTORY AND OTHER RESERVED RIGHTS, ADD ALTERNATE #2: PROPOSED AREA OF SPACE REMODEL INCLUDING COPYRIGHTS OF THE ATTACHED OUTLINED BY SINGLE-DASHED LINE. PERFORM DEMO AND NEW WORK AS SHOWN. DUNHAM PROJECT NUMBER: 0425232-000-00 HCMC HISTOLOGY LAB HCMC PURPLE BUILDING",
+      "counts_per_plan": {
+        "E200": 1
+      },
+      "total": 1,
+      "fixture_references": []
+    }
+  ],
+  "summary": {
+    "total_fixture_types": 13,
+    "total_fixtures": 125,
+    "total_lighting_plans": 1,
+    "total_keynotes": 3
+  },
+  "qa_report": {
+    "overall_confidence": 0.98,
+    "passed": true,
+    "threshold": 0.95,
+    "stage_scores": {
+      "sheet_index": 1.0,
+      "schedule_extraction": 1.0,
+      "fixture_counting": 0.95,
+      "keynote_extraction": 1.0
+    },
+    "warnings": [
+      "Fixture C4: found only 1 time — verify",
+      "Fixture D7: found only 1 time — verify"
+    ],
+    "recommendations": []
+  }
+}

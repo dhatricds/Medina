@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Blueprint Estimation System — Lighting Fixture Inventory</title>
+<style>
+  :root {
+    --primary: #1e3a5f;
+    --primary-light: #2c5282;
+    --accent: #e8942e;
+    --accent-hover: #d4841f;
+    --success: #22c55e;
+    --warning: #f59e0b;
+    --error: #ef4444;
+    --bg: #f1f5f9;
+    --card: #ffffff;
+    --text: #1e293b;
+    --text-light: #64748b;
+    --border: #e2e8f0;
+    --edit-highlight: #fef3c7;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* TOP BAR */
+  .top-bar {
+    background: var(--primary);
+    color: white;
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    z-index: 100;
+  }
+  .top-bar-left { display: flex; align-items: center; gap: 16px; }
+  .logo {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 18px; font-weight: 700; letter-spacing: -0.5px;
+  }
+  .logo svg { width: 28px; height: 28px; }
+  .project-info { font-size: 13px; color: #94a3b8; }
+  .project-name { color: white; font-weight: 600; font-size: 14px; }
+  .top-bar-actions { display: flex; gap: 10px; }
+
+  .btn {
+    padding: 8px 18px; border-radius: 6px; font-size: 13px;
+    font-weight: 600; cursor: pointer; border: none;
+    display: flex; align-items: center; gap: 6px;
+    transition: all 0.15s ease;
+  }
+  .btn-primary { background: var(--accent); color: white; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-secondary { background: rgba(255,255,255,0.1); color: white; border: 1px solid rgba(255,255,255,0.2); }
+  .btn-secondary:hover { background: rgba(255,255,255,0.2); }
+  .btn-success { background: var(--success); color: white; }
+  .btn-success:hover { background: #16a34a; }
+  .btn-sm { padding: 5px 12px; font-size: 12px; }
+  .btn-icon { padding: 6px 10px; }
+
+  /* MAIN LAYOUT */
+  .main-content {
+    flex: 1; display: flex; overflow: hidden;
+  }
+
+  /* LEFT PANEL - PDF */
+  .left-panel {
+    width: 35%; min-width: 300px; background: #1a1a2e;
+    display: flex; flex-direction: column; border-right: 1px solid var(--border);
+  }
+  .pdf-toolbar {
+    padding: 8px 12px; background: #16162a;
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+  }
+  .pdf-toolbar span { color: #94a3b8; font-size: 12px; }
+  .pdf-nav { display: flex; gap: 6px; }
+  .pdf-nav button {
+    background: rgba(255,255,255,0.1); border: none; color: white;
+    padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;
+  }
+  .pdf-nav button:hover { background: rgba(255,255,255,0.2); }
+  .pdf-viewer {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    padding: 16px; overflow: auto;
+  }
+  .pdf-placeholder {
+    color: #64748b; text-align: center; padding: 40px;
+  }
+  .pdf-placeholder svg { width: 64px; height: 64px; margin-bottom: 16px; opacity: 0.5; }
+  .pdf-placeholder p { font-size: 14px; margin-top: 8px; }
+  .upload-zone {
+    border: 2px dashed rgba(255,255,255,0.2); border-radius: 12px;
+    padding: 40px; cursor: pointer; transition: border-color 0.2s;
+  }
+  .upload-zone:hover { border-color: var(--accent); }
+
+  /* CENTER PANEL - AGENTS */
+  .center-panel {
+    width: 240px; min-width: 220px; background: var(--card);
+    border-right: 1px solid var(--border); overflow-y: auto; padding: 16px;
+  }
+  .panel-title {
+    font-size: 12px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.5px; color: var(--text-light); margin-bottom: 16px;
+  }
+  .agent-card {
+    background: var(--bg); border-radius: 8px; padding: 12px;
+    margin-bottom: 10px; border: 1px solid var(--border);
+    cursor: pointer; transition: all 0.15s;
+  }
+  .agent-card:hover { border-color: var(--primary-light); }
+  .agent-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .agent-card.completed { border-left: 3px solid var(--success); }
+  .agent-card.running { border-left: 3px solid var(--accent); }
+  .agent-card.error { border-left: 3px solid var(--error); }
+  .agent-card.pending { border-left: 3px solid var(--border); }
+
+  .agent-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .agent-name { font-size: 13px; font-weight: 600; }
+  .agent-badge {
+    font-size: 10px; padding: 2px 8px; border-radius: 10px; font-weight: 600;
+  }
+  .badge-completed { background: #dcfce7; color: #166534; }
+  .badge-running { background: #fef3c7; color: #92400e; }
+  .badge-error { background: #fee2e2; color: #991b1b; }
+  .badge-pending { background: #f1f5f9; color: #64748b; }
+
+  .agent-desc { font-size: 11px; color: var(--text-light); line-height: 1.4; }
+  .agent-details {
+    margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-light);
+  }
+  .agent-stat { display: flex; justify-content: space-between; margin-bottom: 3px; }
+  .agent-stat-value { font-weight: 600; color: var(--text); }
+  .agent-rerun {
+    margin-top: 8px; font-size: 11px; color: var(--primary-light);
+    cursor: pointer; font-weight: 600;
+  }
+  .agent-rerun:hover { color: var(--accent); }
+
+  .agent-connector {
+    width: 2px; height: 10px; background: var(--border);
+    margin: 0 auto; position: relative;
+  }
+
+  /* RIGHT PANEL - TABLES */
+  .right-panel {
+    flex: 1; display: flex; flex-direction: column; overflow: hidden;
+  }
+  .tabs {
+    display: flex; background: var(--card); border-bottom: 1px solid var(--border);
+    padding: 0 16px;
+  }
+  .tab {
+    padding: 12px 20px; font-size: 13px; font-weight: 600;
+    cursor: pointer; border-bottom: 2px solid transparent;
+    color: var(--text-light); transition: all 0.15s;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--primary); border-bottom-color: var(--accent); }
+  .tab-badge {
+    background: var(--primary); color: white; font-size: 10px;
+    padding: 1px 6px; border-radius: 8px; margin-left: 6px;
+  }
+
+  .table-toolbar {
+    padding: 10px 16px; background: var(--card);
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+  }
+  .table-toolbar-left { display: flex; align-items: center; gap: 12px; }
+  .table-toolbar-left span { font-size: 12px; color: var(--text-light); }
+  .edit-count { font-size: 11px; color: var(--warning); font-weight: 600; }
+
+  .table-container { flex: 1; overflow: auto; padding: 0; }
+
+  table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  thead { position: sticky; top: 0; z-index: 10; }
+  th {
+    background: var(--primary); color: white; padding: 10px 14px;
+    text-align: center; font-weight: 600; font-size: 12px;
+    border-right: 1px solid rgba(255,255,255,0.1);
+    white-space: nowrap;
+  }
+  th:first-child { text-align: left; min-width: 100px; }
+  th:last-child { background: #162d4a; }
+
+  td {
+    padding: 8px 14px; text-align: center;
+    border-bottom: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+  }
+  td:first-child {
+    text-align: left; font-weight: 700; color: var(--primary);
+    background: #f8fafc; position: sticky; left: 0;
+  }
+  td:last-child { font-weight: 700; background: #f0f9ff; }
+
+  tr:hover td { background: #f1f5f9; }
+  tr:hover td:first-child { background: #e8f0fe; }
+  tr:hover td:last-child { background: #e0f2fe; }
+
+  td[contenteditable="true"] { cursor: text; }
+  td[contenteditable="true"]:focus {
+    outline: 2px solid var(--accent); background: white !important;
+  }
+  td.edited { background: var(--edit-highlight) !important; }
+
+  .cell-zero { color: #cbd5e1; }
+
+  /* BOTTOM BAR - QA */
+  .bottom-bar {
+    background: var(--card); border-top: 1px solid var(--border);
+    padding: 10px 24px; display: flex; align-items: center;
+    justify-content: space-between;
+  }
+  .qa-title { font-size: 12px; font-weight: 700; color: var(--text-light); text-transform: uppercase; letter-spacing: 0.5px; }
+  .qa-items { display: flex; gap: 16px; margin-left: 20px; }
+  .qa-item {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 600; cursor: pointer;
+    padding: 4px 10px; border-radius: 6px; transition: background 0.15s;
+  }
+  .qa-item:hover { background: var(--bg); }
+  .qa-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .qa-verified .qa-dot { background: var(--success); }
+  .qa-warning .qa-dot { background: var(--warning); }
+  .qa-error .qa-dot { background: var(--error); }
+  .qa-verified { color: #166534; }
+  .qa-warning { color: #92400e; }
+  .qa-error { color: #991b1b; }
+
+  .bottom-bar-right { display: flex; align-items: center; gap: 12px; }
+  .model-tag {
+    font-size: 10px; padding: 3px 8px; border-radius: 4px;
+    background: #f1f5f9; color: var(--text-light); font-family: monospace;
+  }
+
+  /* ANIMATIONS */
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+  .running .agent-badge { animation: pulse 1.5s infinite; }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  .spinner { animation: spin 1s linear infinite; display: inline-block; }
+
+  /* MODAL */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    display: none; align-items: center; justify-content: center; z-index: 1000;
+  }
+  .modal-overlay.show { display: flex; }
+  .modal {
+    background: white; border-radius: 12px; padding: 28px;
+    max-width: 500px; width: 90%; box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+  }
+  .modal h3 { font-size: 16px; margin-bottom: 8px; }
+  .modal p { font-size: 13px; color: var(--text-light); margin-bottom: 20px; line-height: 1.5; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
+
+  /* TOOLTIP */
+  .tooltip-container { position: relative; }
+  .tooltip {
+    position: absolute; bottom: 120%; left: 50%; transform: translateX(-50%);
+    background: var(--text); color: white; font-size: 11px; padding: 4px 10px;
+    border-radius: 4px; white-space: nowrap; pointer-events: none;
+    opacity: 0; transition: opacity 0.15s;
+  }
+  .tooltip-container:hover .tooltip { opacity: 1; }
+
+  /* FLAG LIST */
+  .flag-list { margin-top: 6px; }
+  .flag-item {
+    font-size: 11px; padding: 3px 0; display: flex; align-items: flex-start; gap: 4px;
+  }
+  .flag-icon { flex-shrink: 0; margin-top: 1px; }
+</style>
+</head>
+<body>
+
+<!-- TOP BAR -->
+<div class="top-bar">
+  <div class="top-bar-left">
+    <div class="logo">
+      <svg viewBox="0 0 28 28" fill="none"><rect width="28" height="28" rx="6" fill="#e8942e"/><path d="M7 14h14M14 7v14M9 9l10 10M19 9L9 19" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>
+      Blueprint Estimation System
+    </div>
+    <div class="project-info">
+      <div class="project-name" id="projectName">Anoka Municipal Dispensary</div>
+      <div>Uploaded Feb 15, 2026 — 12 sheets</div>
+    </div>
+  </div>
+  <div class="top-bar-actions">
+    <button class="btn btn-secondary" onclick="document.getElementById('fileInput').click()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      Upload PDF
+    </button>
+    <input type="file" id="fileInput" accept=".pdf" style="display:none" onchange="handleUpload(this)">
+    <button class="btn btn-secondary" onclick="rerunPipeline()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      Re-run All
+    </button>
+    <button class="btn btn-success" onclick="downloadExcel()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Download Excel
+    </button>
+  </div>
+</div>
+
+<!-- MAIN 3-PANEL LAYOUT -->
+<div class="main-content">
+
+  <!-- LEFT: PDF VIEWER -->
+  <div class="left-panel">
+    <div class="pdf-toolbar">
+      <span id="pdfPageInfo">Page 4 of 12 — E301 Level 1 Lighting Plan</span>
+      <div class="pdf-nav">
+        <button onclick="prevPage()">◀</button>
+        <button onclick="nextPage()">▶</button>
+        <button onclick="zoomIn()">+</button>
+        <button onclick="zoomOut()">−</button>
+      </div>
+    </div>
+    <div class="pdf-viewer" id="pdfViewer">
+      <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
+        <div class="pdf-placeholder">
+          <svg viewBox="0 0 64 64" fill="none" stroke="#64748b" stroke-width="1.5"><rect x="8" y="4" width="48" height="56" rx="4"/><path d="M20 18h24M20 26h24M20 34h16"/><rect x="36" y="40" width="12" height="12" rx="2"/></svg>
+          <p><strong>Drop blueprint PDF here</strong></p>
+          <p>or click to browse</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CENTER: AGENT PIPELINE -->
+  <div class="center-panel">
+    <div class="panel-title">Agent Pipeline</div>
+
+    <!-- Agent 1 -->
+    <div class="agent-card completed active" id="agent1" onclick="selectAgent(1)">
+      <div class="agent-header">
+        <span class="agent-name">1. Schedule Discovery</span>
+        <span class="agent-badge badge-completed">✓ Done</span>
+      </div>
+      <div class="agent-desc">Extract fixture types from schedules</div>
+      <div class="agent-details">
+        <div class="agent-stat"><span>Types found</span><span class="agent-stat-value">10</span></div>
+        <div class="agent-stat"><span>Schedules</span><span class="agent-stat-value">1 (E501)</span></div>
+        <div class="agent-stat"><span>Time</span><span class="agent-stat-value">4.2s</span></div>
+        <div class="agent-rerun" onclick="event.stopPropagation(); rerunAgent(1)">↻ Re-run agent</div>
+      </div>
+    </div>
+    <div class="agent-connector"></div>
+
+    <!-- Agent 2 -->
+    <div class="agent-card completed" id="agent2" onclick="selectAgent(2)">
+      <div class="agent-header">
+        <span class="agent-name">2. Plan Search</span>
+        <span class="agent-badge badge-completed">✓ Done</span>
+      </div>
+      <div class="agent-desc">Locate lighting plan sheets</div>
+      <div class="agent-details">
+        <div class="agent-stat"><span>Plans found</span><span class="agent-stat-value">1</span></div>
+        <div class="agent-stat"><span>Excluded</span><span class="agent-stat-value">1 (demo)</span></div>
+        <div class="agent-stat"><span>Time</span><span class="agent-stat-value">2.8s</span></div>
+        <div class="agent-rerun" onclick="event.stopPropagation(); rerunAgent(2)">↻ Re-run agent</div>
+      </div>
+    </div>
+    <div class="agent-connector"></div>
+
+    <!-- Agent 3 -->
+    <div class="agent-card completed" id="agent3" onclick="selectAgent(3)">
+      <div class="agent-header">
+        <span class="agent-name">3. Fixture Count</span>
+        <span class="agent-badge badge-completed">✓ Done</span>
+      </div>
+      <div class="agent-desc">Count text labels on plans</div>
+      <div class="agent-details">
+        <div class="agent-stat"><span>Total fixtures</span><span class="agent-stat-value" id="totalFixtures">55</span></div>
+        <div class="agent-stat"><span>Flags</span><span class="agent-stat-value" style="color:var(--warning)">1 warning</span></div>
+        <div class="agent-stat"><span>Time</span><span class="agent-stat-value">8.1s</span></div>
+        <div class="flag-list">
+          <div class="flag-item"><span class="flag-icon" style="color:var(--warning)">⚠</span> Type "EG" found on plan but 0 in schedule</div>
+        </div>
+        <div class="agent-rerun" onclick="event.stopPropagation(); rerunAgent(3)">↻ Re-run agent</div>
+      </div>
+    </div>
+    <div class="agent-connector"></div>
+
+    <!-- Agent 4 -->
+    <div class="agent-card completed" id="agent4" onclick="selectAgent(4)">
+      <div class="agent-header">
+        <span class="agent-name">4. Keynote Count</span>
+        <span class="agent-badge badge-completed">✓ Done</span>
+      </div>
+      <div class="agent-desc">Identify and count keynotes</div>
+      <div class="agent-details">
+        <div class="agent-stat"><span>Shape</span><span class="agent-stat-value">◆ Diamond</span></div>
+        <div class="agent-stat"><span>Keynotes</span><span class="agent-stat-value">2</span></div>
+        <div class="agent-stat"><span>Time</span><span class="agent-stat-value">5.3s</span></div>
+        <div class="agent-rerun" onclick="event.stopPropagation(); rerunAgent(4)">↻ Re-run agent</div>
+      </div>
+    </div>
+    <div class="agent-connector"></div>
+
+    <!-- Agent 5 -->
+    <div class="agent-card completed" id="agent5" onclick="selectAgent(5)">
+      <div class="agent-header">
+        <span class="agent-name">5. QA Review</span>
+        <span class="agent-badge badge-completed">✓ Done</span>
+      </div>
+      <div class="agent-desc">Validate all agent outputs</div>
+      <div class="agent-details">
+        <div class="agent-stat"><span>Verified</span><span class="agent-stat-value" style="color:var(--success)">8</span></div>
+        <div class="agent-stat"><span>Warnings</span><span class="agent-stat-value" style="color:var(--warning)">1</span></div>
+        <div class="agent-stat"><span>Errors</span><span class="agent-stat-value" style="color:var(--error)">0</span></div>
+        <div class="agent-stat"><span>Time</span><span class="agent-stat-value">3.5s</span></div>
+        <div class="agent-rerun" onclick="event.stopPropagation(); rerunAgent(5)">↻ Re-run agent</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT: EDITABLE TABLES -->
+  <div class="right-panel">
+    <div class="tabs">
+      <div class="tab active" id="tabLighting" onclick="switchTab('lighting')">
+        Lighting Inventory <span class="tab-badge" id="lightingCount">10</span>
+      </div>
+      <div class="tab" id="tabKeynotes" onclick="switchTab('keynotes')">
+        Keynotes <span class="tab-badge" id="keynoteCount">2</span>
+      </div>
+    </div>
+    <div class="table-toolbar">
+      <div class="table-toolbar-left">
+        <span>Click any count cell to edit</span>
+        <span class="edit-count" id="editCount"></span>
+      </div>
+      <div>
+        <button class="btn btn-sm btn-secondary" style="color:var(--text);border-color:var(--border)" onclick="recalcTotals()">
+          Recalculate Totals
+        </button>
+      </div>
+    </div>
+
+    <!-- LIGHTING TABLE -->
+    <div class="table-container" id="lightingTable">
+      <table>
+        <thead>
+          <tr>
+            <th>TYPE / Page</th>
+            <th>E301</th>
+            <th>Total</th>
+          </tr>
+        </thead>
+        <tbody id="lightingBody"></tbody>
+      </table>
+    </div>
+
+    <!-- KEYNOTES TABLE -->
+    <div class="table-container" id="keynotesTable" style="display:none">
+      <table>
+        <thead>
+          <tr>
+            <th>KeyNote / Page</th>
+            <th>E301</th>
+            <th>Total</th>
+          </tr>
+        </thead>
+        <tbody id="keynoteBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- BOTTOM BAR - QA -->
+<div class="bottom-bar">
+  <div style="display:flex;align-items:center;">
+    <span class="qa-title">QA Summary</span>
+    <div class="qa-items">
+      <div class="qa-item qa-verified"><span class="qa-dot"></span> 8 Verified</div>
+      <div class="qa-item qa-warning" onclick="showWarnings()"><span class="qa-dot"></span> 1 Warning</div>
+      <div class="qa-item qa-error"><span class="qa-dot"></span> 0 Errors</div>
+    </div>
+  </div>
+  <div class="bottom-bar-right">
+    <span class="model-tag">Agents: claude-sonnet-4-20250514</span>
+    <span class="model-tag">QA: claude-opus-4-20250514</span>
+    <span style="font-size:11px;color:var(--text-light)">Pipeline: 23.9s total</span>
+  </div>
+</div>
+
+<!-- WARNING MODAL -->
+<div class="modal-overlay" id="warningModal">
+  <div class="modal">
+    <h3>⚠ QA Warnings</h3>
+    <p>The following items need human review:</p>
+    <div style="background:#fef3c7;padding:12px;border-radius:8px;font-size:13px;margin-bottom:16px;">
+      <strong>Type "EG" — possible orphan:</strong> Found 1 instance on E301, but this type does not appear in the Lighting Schedule on E501. Verify if this is an unlisted emergency fixture or a misread label.
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" style="color:var(--text);border-color:var(--border)" onclick="closeWarnings()">Dismiss</button>
+      <button class="btn btn-primary" onclick="closeWarnings()">Mark as Reviewed</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ========== DATA (JSON BACKEND) ==========
+const projectData = {
+  project: {
+    name: "Anoka Municipal Dispensary",
+    drawing_set: "Anoka Dispensary Drawings.pdf",
+    processed_date: "2026-02-15T10:30:00Z"
+  },
+  agents: {
+    agent_3_fixture_count: {
+      lighting_matrix: {
+        columns: ["E301"],
+        rows: [
+          { fixture_type: "A", counts: [14], total: 14 },
+          { fixture_type: "B", counts: [10], total: 10 },
+          { fixture_type: "C", counts: [2], total: 2 },
+          { fixture_type: "D", counts: [10], total: 10 },
+          { fixture_type: "D1", counts: [1], total: 1 },
+          { fixture_type: "EG", counts: [1], total: 1 },
+          { fixture_type: "EX", counts: [4], total: 4 },
+          { fixture_type: "F", counts: [7], total: 7 },
+          { fixture_type: "W1", counts: [4], total: 4 },
+          { fixture_type: "W2", counts: [2], total: 2 }
+        ]
+      }
+    },
+    agent_4_keynote: {
+      keynote_matrix: {
+        columns: ["E301"],
+        rows: [
+          { keynote_number: 1, counts: [4], total: 4 },
+          { keynote_number: 2, counts: [1], total: 1 }
+        ]
+      }
+    }
+  },
+  user_corrections: []
+};
+
+let editCount = 0;
+
+// ========== RENDER TABLES ==========
+function renderLightingTable() {
+  const tbody = document.getElementById('lightingBody');
+  const data = projectData.agents.agent_3_fixture_count.lighting_matrix;
+  tbody.innerHTML = data.rows.map((row, i) => {
+    const cells = row.counts.map((c, j) =>
+      `<td contenteditable="true" class="${c === 0 ? 'cell-zero' : ''}"
+           data-type="lighting" data-row="${i}" data-col="${j}"
+           oninput="handleEdit(this, ${i}, ${j}, 'lighting')">${c}</td>`
+    ).join('');
+    return `<tr>
+      <td>${row.fixture_type}</td>
+      ${cells}
+      <td class="total-cell">${row.total}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('lightingCount').textContent = data.rows.length;
+}
+
+function renderKeynoteTable() {
+  const tbody = document.getElementById('keynoteBody');
+  const data = projectData.agents.agent_4_keynote.keynote_matrix;
+  tbody.innerHTML = data.rows.map((row, i) => {
+    const cells = row.counts.map((c, j) =>
+      `<td contenteditable="true" class="${c === 0 ? 'cell-zero' : ''}"
+           data-type="keynote" data-row="${i}" data-col="${j}"
+           oninput="handleEdit(this, ${i}, ${j}, 'keynote')">${c}</td>`
+    ).join('');
+    return `<tr>
+      <td>${row.keynote_number}</td>
+      ${cells}
+      <td class="total-cell">${row.total}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('keynoteCount').textContent = data.rows.length;
+}
+
+// ========== EDIT HANDLING ==========
+function handleEdit(cell, rowIdx, colIdx, type) {
+  const val = parseInt(cell.textContent) || 0;
+  const matrix = type === 'lighting'
+    ? projectData.agents.agent_3_fixture_count.lighting_matrix
+    : projectData.agents.agent_4_keynote.keynote_matrix;
+
+  const original = matrix.rows[rowIdx].counts[colIdx];
+  matrix.rows[rowIdx].counts[colIdx] = val;
+
+  if (val !== original) {
+    cell.classList.add('edited');
+    cell.classList.remove('cell-zero');
+    const identifier = type === 'lighting'
+      ? matrix.rows[rowIdx].fixture_type
+      : matrix.rows[rowIdx].keynote_number;
+    projectData.user_corrections.push({
+      type, identifier,
+      sheet: matrix.columns[colIdx],
+      original, corrected: val, corrected_by: "user"
+    });
+    editCount++;
+    document.getElementById('editCount').textContent = `${editCount} manual edit${editCount > 1 ? 's' : ''}`;
+  }
+}
+
+function recalcTotals() {
+  ['agent_3_fixture_count', 'agent_4_keynote'].forEach(agentKey => {
+    const matrixKey = agentKey.includes('fixture') ? 'lighting_matrix' : 'keynote_matrix';
+    const matrix = projectData.agents[agentKey][matrixKey];
+    matrix.rows.forEach(row => {
+      row.total = row.counts.reduce((a, b) => a + b, 0);
+    });
+  });
+  renderLightingTable();
+  renderKeynoteTable();
+  updateTotalFixtures();
+}
+
+function updateTotalFixtures() {
+  const total = projectData.agents.agent_3_fixture_count.lighting_matrix.rows
+    .reduce((sum, row) => sum + row.total, 0);
+  document.getElementById('totalFixtures').textContent = total;
+}
+
+// ========== TAB SWITCHING ==========
+function switchTab(tab) {
+  document.getElementById('tabLighting').classList.toggle('active', tab === 'lighting');
+  document.getElementById('tabKeynotes').classList.toggle('active', tab === 'keynotes');
+  document.getElementById('lightingTable').style.display = tab === 'lighting' ? 'block' : 'none';
+  document.getElementById('keynotesTable').style.display = tab === 'keynotes' ? 'block' : 'none';
+}
+
+// ========== AGENT SELECTION ==========
+function selectAgent(n) {
+  document.querySelectorAll('.agent-card').forEach(c => c.classList.remove('active'));
+  document.getElementById('agent' + n).classList.add('active');
+}
+
+// ========== AGENT RE-RUN (DEMO) ==========
+function rerunAgent(n) {
+  const card = document.getElementById('agent' + n);
+  const badge = card.querySelector('.agent-badge');
+  card.className = 'agent-card running active';
+  badge.className = 'agent-badge badge-running';
+  badge.textContent = '⟳ Running';
+  selectAgent(n);
+
+  setTimeout(() => {
+    card.className = 'agent-card completed active';
+    badge.className = 'agent-badge badge-completed';
+    badge.textContent = '✓ Done';
+  }, 2500);
+}
+
+function rerunPipeline() {
+  [1,2,3,4,5].forEach((n, i) => {
+    setTimeout(() => rerunAgent(n), i * 2000);
+  });
+}
+
+// ========== EXCEL DOWNLOAD ==========
+function downloadExcel() {
+  const lightingData = [
+    ['TYPE/Page', ...projectData.agents.agent_3_fixture_count.lighting_matrix.columns, 'Total'],
+    ...projectData.agents.agent_3_fixture_count.lighting_matrix.rows.map(r =>
+      [r.fixture_type, ...r.counts, r.total]
+    )
+  ];
+  const keynoteData = [
+    ['KeyNote/Page', ...projectData.agents.agent_4_keynote.keynote_matrix.columns, 'Total'],
+    ...projectData.agents.agent_4_keynote.keynote_matrix.rows.map(r =>
+      [r.keynote_number, ...r.counts, r.total]
+    )
+  ];
+
+  // Generate CSV as fallback (in production, use SheetJS for real XLSX)
+  let csv = 'LIGHTING INVENTORY\n';
+  csv += lightingData.map(r => r.join(',')).join('\n');
+  csv += '\n\nKEYNOTE INVENTORY\n';
+  csv += keynoteData.map(r => r.join(',')).join('\n');
+
+  if (typeof XLSX !== 'undefined') {
+    const wb = XLSX.utils.book_new();
+    const ws1 = XLSX.utils.aoa_to_sheet(lightingData);
+    const ws2 = XLSX.utils.aoa_to_sheet(keynoteData);
+    XLSX.utils.book_append_sheet(wb, ws1, 'Lighting');
+    XLSX.utils.book_append_sheet(wb, ws2, 'Keynote');
+    XLSX.writeFile(wb, projectData.project.name.replace(/\s/g, '_') + '_Inventory.xlsx');
+  } else {
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = projectData.project.name.replace(/\s/g, '_') + '_Inventory.csv';
+    a.click();
+  }
+}
+
+// ========== PDF (DEMO) ==========
+let currentPage = 4;
+const totalPages = 12;
+const sheetNames = {
+  1: 'E001 Cover Sheet', 2: 'E101 Electrical Legend', 3: 'E201 Electrical Site Plan',
+  4: 'E301 Level 1 Lighting Plan', 5: 'E401 Level 1 Power Plan', 6: 'E402 Level 1 Systems Plan',
+  7: 'E501 Schedules', 8: 'E601 Panel Schedules', 9: 'E701 Details',
+  10: 'E702 Details (cont)', 11: 'E801 Specifications', 12: 'E901 Single Line Diagram'
+};
+
+function updatePageInfo() {
+  document.getElementById('pdfPageInfo').textContent =
+    `Page ${currentPage} of ${totalPages} — ${sheetNames[currentPage] || ''}`;
+}
+function prevPage() { if (currentPage > 1) { currentPage--; updatePageInfo(); } }
+function nextPage() { if (currentPage < totalPages) { currentPage++; updatePageInfo(); } }
+function zoomIn() {}
+function zoomOut() {}
+function handleUpload(input) {
+  if (input.files.length) {
+    document.getElementById('projectName').textContent = input.files[0].name.replace('.pdf', '');
+    rerunPipeline();
+  }
+}
+
+// ========== MODALS ==========
+function showWarnings() { document.getElementById('warningModal').classList.add('show'); }
+function closeWarnings() { document.getElementById('warningModal').classList.remove('show'); }
+
+// ========== INIT ==========
+renderLightingTable();
+renderKeynoteTable();
+updatePageInfo();
+</script>
+
+<!-- SheetJS for real Excel export -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+</body>
+</html>
