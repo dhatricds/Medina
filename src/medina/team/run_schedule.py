@@ -98,13 +98,14 @@ def run(source: str, work_dir: str) -> dict:
                 sorted(found_plan_codes),
             )
 
-    # --- VLM fallback for image-based schedules ---
+    # --- VLM fallback when pdfplumber extracted 0 fixtures ---
+    # Triggered when: (a) pdfplumber found no fixtures, or (b) page has
+    # image-based content.  Covers both truly rasterized pages and pages
+    # with text tables whose column headers don't match expected patterns.
     config = get_config()
     if not fixtures and schedule_pages and config.anthropic_api_key:
         from medina.schedule.vlm_extractor import (
             extract_schedule_vlm,
-            has_image_based_content,
-            has_minimal_text,
         )
         from medina.pdf.renderer import render_page_to_image
         import base64
@@ -114,45 +115,42 @@ def run(source: str, work_dir: str) -> dict:
             if spdf is None:
                 continue
 
-            is_image = has_image_based_content(spdf)
-            is_sparse = has_minimal_text(spdf)
-
-            if is_image or is_sparse:
-                label = spage.sheet_code or str(spage.page_number)
-                logger.info(
-                    "[SCHEDULE] Page %s has image content — using VLM",
-                    label,
+            label = spage.sheet_code or str(spage.page_number)
+            logger.info(
+                "[SCHEDULE] pdfplumber found 0 fixtures on %s — "
+                "trying VLM fallback",
+                label,
+            )
+            try:
+                sched_dpi = min(config.render_dpi, 200)
+                img_bytes = render_page_to_image(
+                    spage.source_path, spage.pdf_page_index,
+                    dpi=sched_dpi,
                 )
-                try:
-                    sched_dpi = min(config.render_dpi, 200)
+                b64_size = len(base64.b64encode(img_bytes))
+                while b64_size > 5_000_000 and sched_dpi > 72:
+                    sched_dpi = max(72, sched_dpi - 20)
                     img_bytes = render_page_to_image(
                         spage.source_path, spage.pdf_page_index,
                         dpi=sched_dpi,
                     )
                     b64_size = len(base64.b64encode(img_bytes))
-                    while b64_size > 5_000_000 and sched_dpi > 72:
-                        sched_dpi = max(72, sched_dpi - 20)
-                        img_bytes = render_page_to_image(
-                            spage.source_path, spage.pdf_page_index,
-                            dpi=sched_dpi,
-                        )
-                        b64_size = len(base64.b64encode(img_bytes))
-                    vlm_fixtures = extract_schedule_vlm(
-                        spage, img_bytes, config,
-                        plan_codes_hint=(
-                            found_plan_codes if found_plan_codes else None
-                        ),
-                    )
-                    fixtures.extend(vlm_fixtures)
-                    logger.info(
-                        "[SCHEDULE] VLM extracted %d fixtures from %s",
-                        len(vlm_fixtures),
-                        label,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "[SCHEDULE] VLM failed for %s: %s", label, e
-                    )
+                vlm_fixtures = extract_schedule_vlm(
+                    spage, img_bytes, config,
+                    plan_codes_hint=(
+                        found_plan_codes if found_plan_codes else None
+                    ),
+                )
+                fixtures.extend(vlm_fixtures)
+                logger.info(
+                    "[SCHEDULE] VLM extracted %d fixtures from %s",
+                    len(vlm_fixtures),
+                    label,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[SCHEDULE] VLM failed for %s: %s", label, e
+                )
 
     # Cross-reference VLM codes against plan page text
     if fixtures and found_plan_codes:

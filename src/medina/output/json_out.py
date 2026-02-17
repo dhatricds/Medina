@@ -63,8 +63,22 @@ def build_json_output(result: ExtractionResult) -> dict:
             "recommendations": result.qa_report.recommendations,
         }
 
+    # Build a page list from pages (always available) so frontend can navigate
+    # even when the sheet index is empty.
+    pages_data = [
+        {
+            "page_number": p.page_number,
+            "sheet_code": p.sheet_code or f"Page {p.page_number}",
+            "description": p.sheet_title or "",
+            "type": p.page_type.value if hasattr(p.page_type, "value") else str(p.page_type),
+        }
+        for p in result.pages
+    ]
+
     return {
         "project_name": result.source,
+        "total_pages": len(result.pages),
+        "pages": pages_data,
         "sheet_index": sheet_index_data,
         "lighting_plans": result.plan_pages,
         "schedule_pages": result.schedule_pages,

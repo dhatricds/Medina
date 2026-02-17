@@ -1,6 +1,12 @@
 import { useState, useRef, useCallback } from 'react';
+import { Document, Page, pdfjs } from 'react-pdf';
+import 'react-pdf/dist/Page/AnnotationLayer.css';
+import 'react-pdf/dist/Page/TextLayer.css';
 import { useProjectStore } from '../../store/projectStore';
-import { getPageImageUrl } from '../../api/client';
+import { getPdfUrl, getPageImageUrl } from '../../api/client';
+
+// Configure pdf.js worker from CDN
+pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 4;
@@ -8,17 +14,23 @@ const ZOOM_STEP = 0.25;
 
 export default function PdfViewer() {
   const { projectData, projectId, currentPage, totalPages, setCurrentPage, appState } = useProjectStore();
-  const [imgError, setImgError] = useState(false);
   const [zoom, setZoom] = useState(1);
+  const [numPages, setNumPages] = useState<number | null>(null);
+  const [pdfError, setPdfError] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
   const sheetIndex = projectData?.sheet_index ?? [];
+  const pages = projectData?.pages ?? [];
 
   const currentSheet = sheetIndex[currentPage - 1];
+  const currentPageEntry = pages[currentPage - 1];
   const pageLabel = currentSheet
     ? `${currentSheet.sheet_code} ${currentSheet.description}`
-    : '';
+    : currentPageEntry
+      ? `${currentPageEntry.sheet_code} ${currentPageEntry.description}`
+      : '';
 
-  const hasBackendImage = projectId && appState === 'complete';
+  const hasProject = projectId && appState === 'complete';
   const canNavigate = totalPages > 1;
 
   const zoomIn = useCallback(() => setZoom(z => Math.min(MAX_ZOOM, z + ZOOM_STEP)), []);
@@ -27,7 +39,6 @@ export default function PdfViewer() {
 
   const goToPrev = useCallback(() => {
     if (currentPage > 1) {
-      setImgError(false);
       setZoom(1);
       setCurrentPage(currentPage - 1);
     }
@@ -35,7 +46,6 @@ export default function PdfViewer() {
 
   const goToNext = useCallback(() => {
     if (currentPage < totalPages) {
-      setImgError(false);
       setZoom(1);
       setCurrentPage(currentPage + 1);
     }
@@ -51,7 +61,32 @@ export default function PdfViewer() {
     }
   }, []);
 
+  // Measure container width so react-pdf can fit the page
+  const measuredRef = useCallback((node: HTMLDivElement | null) => {
+    if (node) {
+      const observer = new ResizeObserver(entries => {
+        for (const entry of entries) {
+          setContainerWidth(entry.contentRect.width - 32); // minus padding
+        }
+      });
+      observer.observe(node);
+      containerRef.current = node;
+      setContainerWidth(node.clientWidth - 32);
+    }
+  }, []);
+
+  const onDocumentLoadSuccess = useCallback(({ numPages: n }: { numPages: number }) => {
+    setNumPages(n);
+    setPdfError(false);
+  }, []);
+
+  const onDocumentLoadError = useCallback(() => {
+    setPdfError(true);
+  }, []);
+
   const zoomPercent = Math.round(zoom * 100);
+  const pdfUrl = hasProject ? getPdfUrl(projectId) : null;
+  const pageWidth = containerWidth > 0 ? containerWidth * zoom : undefined;
 
   return (
     <div className="flex-1 flex flex-col">
@@ -65,8 +100,7 @@ export default function PdfViewer() {
           }
         </span>
         <div className="flex gap-1.5 items-center shrink-0">
-          {/* Zoom controls */}
-          {hasBackendImage && (
+          {hasProject && (
             <>
               <button
                 className="bg-white/10 border-none text-white px-2 py-1 rounded text-xs cursor-pointer hover:bg-white/20 disabled:opacity-30"
@@ -94,7 +128,6 @@ export default function PdfViewer() {
               <div className="w-px h-4 bg-white/20 mx-1" />
             </>
           )}
-          {/* Page navigation — always visible when there are pages */}
           {canNavigate && (
             <>
               <button
@@ -117,7 +150,7 @@ export default function PdfViewer() {
       </div>
 
       <div
-        ref={containerRef}
+        ref={measuredRef}
         className="flex-1 overflow-auto p-4"
         onWheel={handleWheel}
         style={{ cursor: zoom > 1 ? 'grab' : 'default' }}
@@ -126,9 +159,32 @@ export default function PdfViewer() {
           className="flex items-center justify-center"
           style={{ minHeight: '100%', minWidth: '100%' }}
         >
-          {hasBackendImage && !imgError ? (
+          {pdfUrl && !pdfError ? (
+            <Document
+              file={pdfUrl}
+              onLoadSuccess={onDocumentLoadSuccess}
+              onLoadError={onDocumentLoadError}
+              loading={
+                <div className="text-center text-slate-500">
+                  <div className="w-12 h-12 border-4 border-accent/30 border-t-accent rounded-full animate-spin mx-auto mb-4" />
+                  <p className="text-sm">Loading PDF...</p>
+                </div>
+              }
+            >
+              <Page
+                pageNumber={currentPage}
+                width={pageWidth}
+                renderTextLayer={true}
+                renderAnnotationLayer={true}
+                loading={
+                  <div className="text-slate-500 text-sm">Rendering page...</div>
+                }
+              />
+            </Document>
+          ) : hasProject && pdfError ? (
+            /* Fallback to image-based rendering for folder projects */
             <img
-              src={getPageImageUrl(projectId, currentPage)}
+              src={getPageImageUrl(projectId, currentPage, 300)}
               alt={`Page ${currentPage}`}
               className="object-contain rounded shadow-lg transition-transform duration-150"
               style={{
@@ -136,7 +192,7 @@ export default function PdfViewer() {
                 maxWidth: 'none',
               }}
               draggable={false}
-              onError={() => setImgError(true)}
+              onError={() => {}}
             />
           ) : appState === 'processing' ? (
             <div className="text-center text-slate-500">
@@ -150,12 +206,8 @@ export default function PdfViewer() {
                 <rect x="8" y="4" width="48" height="56" rx="4" />
                 <path d="M20 18h24M20 26h24M20 34h16" />
               </svg>
-              <p className="text-sm">
-                {imgError ? 'Failed to load page image' : 'PDF viewer available in live mode'}
-              </p>
-              <p className="text-xs mt-1 text-slate-600">
-                {imgError ? 'The backend may not have this page rendered' : 'Demo mode shows data only'}
-              </p>
+              <p className="text-sm">PDF viewer available in live mode</p>
+              <p className="text-xs mt-1 text-slate-600">Demo mode shows data only</p>
             </div>
           )}
         </div>

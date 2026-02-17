@@ -1,8 +1,10 @@
-"""Routes for PDF page rendering."""
+"""Routes for PDF page rendering and serving."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 
 from medina.api.projects import get_project
 
@@ -15,7 +17,7 @@ async def get_page_image(
     page_number: int,
     dpi: int = Query(default=150, ge=72, le=300),
 ):
-    """Render a PDF page as a PNG image."""
+    """Render a PDF page as a PNG image (legacy fallback)."""
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -31,3 +33,29 @@ async def get_page_image(
         return Response(content=png_bytes, media_type="image/png")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/projects/{project_id}/pdf")
+async def get_pdf_file(project_id: str):
+    """Serve the raw PDF file for client-side rendering."""
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    source = project.source_path
+    if not source.exists():
+        raise HTTPException(status_code=404, detail="PDF file not found")
+
+    # For single-file PDFs, serve directly.
+    # For folder-based projects, we can't serve a single PDF — fall back.
+    if source.is_file() and source.suffix.lower() == ".pdf":
+        return FileResponse(
+            path=str(source),
+            media_type="application/pdf",
+            filename=source.name,
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail="Source is a folder, use per-page image endpoint instead",
+    )

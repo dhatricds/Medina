@@ -1,9 +1,18 @@
-"""Count fixture occurrences on lighting plan pages using text extraction."""
+"""Count fixture occurrences on lighting plan pages using text extraction.
+
+Primary method: character-level pair detection from ``page.chars`` with
+modal font-size filtering.  This avoids the word-splitting bug where
+``extract_words()`` separates tightly-kerned labels like "A1" into
+separate "A" and "1" tokens, and the grid-label false-positive bug
+where large-font structural labels (e.g. column grid "E3") are counted
+as fixtures.
+"""
 
 from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from typing import Any
 
 from medina.exceptions import FixtureCountError
@@ -14,31 +23,22 @@ logger = logging.getLogger(__name__)
 # Fraction of page dimensions used for exclusion zones.
 _TITLE_BLOCK_X_FRAC = 0.80  # Title block starts at rightmost 20%
 _TITLE_BLOCK_Y_FRAC = 0.85  # Title block starts at bottom 15%
+_LEGEND_COL_X_FRAC = 0.85   # Notes/keynotes/legend column starts at rightmost 15%
 _BORDER_FRAC = 0.02          # 2% border on all sides
 
+# Maximum gap (pts) between consecutive characters in a fixture label.
+_MAX_CHAR_GAP = 6.0
+# Maximum vertical offset (pts) between consecutive characters.
+_MAX_CHAR_DY = 3.0
+# Gap within which an adjacent alphanumeric character blocks a boundary.
+_BOUNDARY_GAP = 5.0
+# Font-size tolerance multiplier for modal filtering (1.5 = ±50%).
+_FONT_SIZE_TOLERANCE = 1.5
 
-def _build_code_pattern(code: str) -> re.Pattern[str]:
-    """Build a regex pattern that matches a fixture code with word boundaries.
 
-    Handles variations like "A1", "(A1)", "A-1", and ensures "A1" does not
-    match inside "A10" or "EA1".
-    """
-    # Escape the code for regex safety, then allow an optional hyphen
-    # between the letter(s) and digit(s).
-    m = re.match(r'^([A-Za-z]+)(\d+)$', code)
-    if m:
-        letters, digits = m.group(1), m.group(2)
-        escaped = re.escape(letters) + r'-?' + re.escape(digits)
-    else:
-        escaped = re.escape(code)
-
-    # Use word boundaries but also allow the code to be wrapped in parens
-    # or brackets, which is common on electrical drawings.
-    return re.compile(
-        r'(?<![A-Za-z0-9])' + escaped + r'(?![A-Za-z0-9])',
-        re.IGNORECASE,
-    )
-
+# ---------------------------------------------------------------------------
+# Exclusion-zone helpers (unchanged)
+# ---------------------------------------------------------------------------
 
 def _is_in_exclusion_zone(
     x: float,
@@ -49,10 +49,10 @@ def _is_in_exclusion_zone(
     """Check whether a coordinate falls inside an exclusion zone.
 
     Exclusion zones:
+    - Legend column: rightmost 15% at any height (notes, keynotes, stamps)
     - Title block: rightmost 20% AND bottom 15% (the corner box)
     - Border: outermost 2% on all four sides
     """
-    # Border exclusion
     min_x = page_width * _BORDER_FRAC
     max_x = page_width * (1 - _BORDER_FRAC)
     min_y = page_height * _BORDER_FRAC
@@ -60,7 +60,9 @@ def _is_in_exclusion_zone(
     if x < min_x or x > max_x or y < min_y or y > max_y:
         return True
 
-    # Title block exclusion (bottom-right corner)
+    if x > page_width * _LEGEND_COL_X_FRAC:
+        return True
+
     if x > page_width * _TITLE_BLOCK_X_FRAC and y > page_height * _TITLE_BLOCK_Y_FRAC:
         return True
 
@@ -105,8 +107,6 @@ def _find_schedule_table_bbox(
             continue
         if not rows:
             continue
-        # Only check the header row (first row) — not data rows which
-        # may contain fixture-related words in general notes.
         header_text = " ".join(
             str(cell).lower() for cell in rows[0] if cell
         )
@@ -136,17 +136,170 @@ def _is_in_bbox(
     return (x0 - margin) <= x <= (x1 + margin) and (top - margin) <= y <= (bottom + margin)
 
 
+# ---------------------------------------------------------------------------
+# Character-level fixture detection (new — fixes BUG-001 & BUG-002)
+# ---------------------------------------------------------------------------
+
+def _find_char_sequences(
+    chars: list[dict[str, Any]],
+    code: str,
+    page_width: float,
+    page_height: float,
+    schedule_bbox: tuple[float, float, float, float] | None,
+) -> list[dict[str, Any]]:
+    """Find character sequences on the page that spell *code*.
+
+    Returns a list of match dicts with keys:
+      ``x0``, ``top``, ``x1``, ``bottom``, ``cx``, ``cy``, ``font_size``,
+      ``char_index`` (index into *chars* of the first character).
+    """
+    code_upper = code.upper()
+    code_len = len(code_upper)
+    matches: list[dict[str, Any]] = []
+
+    for i in range(len(chars) - code_len + 1):
+        # --- 1. Check spelling ---
+        valid = True
+        for j in range(code_len):
+            if chars[i + j]["text"].upper() != code_upper[j]:
+                valid = False
+                break
+            # Adjacency with previous character in the sequence.
+            if j > 0:
+                prev = chars[i + j - 1]
+                curr = chars[i + j]
+                dx = curr["x0"] - prev["x1"]
+                dy = abs(curr["top"] - prev["top"])
+                if dx > _MAX_CHAR_GAP or dx < -2 or dy > _MAX_CHAR_DY:
+                    valid = False
+                    break
+        if not valid:
+            continue
+
+        # --- 2. Word-boundary check (leading) ---
+        # Use abs(dx) — content-stream order doesn't guarantee spatial order,
+        # so a large negative dx means the previous char is far away, not adjacent.
+        if i > 0:
+            prev_c = chars[i - 1]
+            dx_before = chars[i]["x0"] - prev_c["x1"]
+            dy_before = abs(chars[i]["top"] - prev_c["top"])
+            if (abs(dx_before) < _BOUNDARY_GAP
+                    and dy_before < _MAX_CHAR_DY
+                    and prev_c["text"].isalnum()):
+                continue
+
+        # --- 3. Word-boundary check (trailing) ---
+        end_i = i + code_len
+        if end_i < len(chars):
+            next_c = chars[end_i]
+            last_c = chars[end_i - 1]
+            dx_after = next_c["x0"] - last_c["x1"]
+            dy_after = abs(next_c["top"] - last_c["top"])
+            if (abs(dx_after) < _BOUNDARY_GAP
+                    and dy_after < _MAX_CHAR_DY
+                    and next_c["text"].isalnum()):
+                continue
+
+        # --- 4. Position / exclusion filtering ---
+        first = chars[i]
+        last = chars[i + code_len - 1]
+        cx = (first["x0"] + last["x1"]) / 2
+        cy = (first["top"] + first["bottom"]) / 2
+
+        if _is_in_exclusion_zone(cx, cy, page_width, page_height):
+            continue
+        if schedule_bbox and _is_in_bbox(cx, cy, schedule_bbox):
+            continue
+
+        font_size = first.get("size", first.get("height", 0))
+        matches.append({
+            "x0": first["x0"],
+            "top": first["top"],
+            "x1": last["x1"],
+            "bottom": last["bottom"],
+            "cx": cx,
+            "cy": cy,
+            "font_size": font_size,
+            "char_index": i,
+        })
+
+    return matches
+
+
+def _apply_font_size_filter(
+    all_matches: dict[str, list[dict[str, Any]]],
+    tolerance: float = _FONT_SIZE_TOLERANCE,
+) -> dict[str, list[dict[str, Any]]]:
+    """Remove matches whose font size deviates from the modal fixture size.
+
+    The modal font size is computed across **all** fixture-code matches
+    (not per-code) so that grid-line labels, room numbers, and title text
+    — which are typically 1.5–3× larger — are rejected.
+    """
+    all_sizes: list[float] = []
+    for matches in all_matches.values():
+        all_sizes.extend(m["font_size"] for m in matches)
+
+    if not all_sizes:
+        return all_matches
+
+    # Bin to nearest 0.5 pt for a stable mode.
+    rounded = [round(s * 2) / 2 for s in all_sizes]
+    size_counts = Counter(rounded)
+    modal_size = size_counts.most_common(1)[0][0]
+
+    if modal_size <= 0:
+        return all_matches
+
+    lo = modal_size / tolerance
+    hi = modal_size * tolerance
+
+    filtered: dict[str, list[dict[str, Any]]] = {}
+    for code, matches in all_matches.items():
+        kept = [m for m in matches if lo <= round(m["font_size"] * 2) / 2 <= hi]
+        removed = len(matches) - len(kept)
+        if removed:
+            logger.debug(
+                "Font-size filter removed %d/%d matches for %s "
+                "(modal=%.1f, range=%.1f–%.1f)",
+                removed, len(matches), code, modal_size, lo, hi,
+            )
+        filtered[code] = kept
+
+    return filtered
+
+
+# ---------------------------------------------------------------------------
+# Cross-reference filtering for sheet-code fixtures
+# ---------------------------------------------------------------------------
+
+_CROSSREF_WORDS = {"see", "sheet", "refer", "reference", "plan", "dwg", "drawing"}
+
+
+def _is_near_crossref(
+    match: dict[str, Any],
+    words: list[dict[str, Any]],
+    max_dx: float = 60.0,
+    max_dy: float = 10.0,
+) -> bool:
+    """Return True if a cross-reference word appears just left of *match*."""
+    mx, my = match["cx"], match["cy"]
+    for w in words:
+        wx = (w["x0"] + w["x1"]) / 2
+        wy = (w["top"] + w["bottom"]) / 2
+        if wx < mx and abs(wy - my) < max_dy and (mx - wx) < max_dx:
+            if w["text"].lower().strip(".,;:()") in _CROSSREF_WORDS:
+                return True
+    return False
+
+
 def _extract_plan_words(
     pdf_page: Any,
+    schedule_bbox: tuple[float, float, float, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract words from a pdfplumber page, filtering out exclusion zones.
 
-    Filters out:
-    - Title block (bottom-right corner)
-    - Border area (outermost 2%)
-    - Luminaire schedule table (if embedded in the plan page)
-
-    Returns a list of word dicts with keys: text, x0, top, x1, bottom.
+    Used only for cross-reference context lookup (not for counting).
     """
     page_width = pdf_page.width
     page_height = pdf_page.height
@@ -156,8 +309,6 @@ def _extract_plan_words(
         y_tolerance=3,
         keep_blank_chars=False,
     )
-
-    schedule_bbox = _find_schedule_table_bbox(pdf_page)
 
     filtered: list[dict[str, Any]] = []
     for w in words:
@@ -172,38 +323,27 @@ def _extract_plan_words(
     return filtered
 
 
-_CROSSREF_WORDS = {"see", "sheet", "refer", "reference", "plan", "dwg", "drawing"}
+# ---------------------------------------------------------------------------
+# Legacy word-level helpers (kept for backward compatibility)
+# ---------------------------------------------------------------------------
+
+def _build_code_pattern(code: str) -> re.Pattern[str]:
+    """Build a regex pattern that matches a fixture code with word boundaries."""
+    m = re.match(r'^([A-Za-z]+)(\d+)$', code)
+    if m:
+        letters, digits = m.group(1), m.group(2)
+        escaped = re.escape(letters) + r'-?' + re.escape(digits)
+    else:
+        escaped = re.escape(code)
+    return re.compile(
+        r'(?<![A-Za-z0-9])' + escaped + r'(?![A-Za-z0-9])',
+        re.IGNORECASE,
+    )
 
 
-def _count_word_matches_filtered(
-    words: list[dict[str, Any]],
-    code: str,
-    pattern: re.Pattern[str],
-    is_sheet_code: bool,
-) -> int:
-    """Count per-word matches, filtering out cross-reference context.
-
-    For fixture codes that also match a plan sheet code, only count
-    occurrences that are NOT preceded by cross-reference words like
-    "SEE", "SHEET", "REFER TO", etc.
-    """
-    count = 0
-    for i, w in enumerate(words):
-        if not pattern.fullmatch(w["text"].strip("()[]")):
-            continue
-        if is_sheet_code:
-            # Check preceding word(s) for cross-reference indicators.
-            skip = False
-            for lookback in range(1, min(4, i + 1)):
-                prev_text = words[i - lookback]["text"].lower().strip(".,;:()")
-                if prev_text in _CROSSREF_WORDS:
-                    skip = True
-                    break
-            if skip:
-                continue
-        count += 1
-    return count
-
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def count_fixtures_on_plan(
     page_info: PageInfo,
@@ -212,6 +352,11 @@ def count_fixtures_on_plan(
     plan_sheet_codes: list[str] | None = None,
 ) -> dict[str, int]:
     """Count occurrences of each fixture code on a single lighting plan page.
+
+    Uses **character-level** detection from ``page.chars`` with modal
+    font-size filtering.  For fixture codes that match a plan sheet code,
+    an additional cross-reference filter removes occurrences preceded by
+    words like "SEE", "SHEET", etc.
 
     Args:
         page_info: Page metadata.
@@ -235,48 +380,61 @@ def count_fixtures_on_plan(
         logger.warning("No fixture codes provided for plan %s", sheet)
         return {}
 
-    sheet_code_set = {c.upper() for c in (plan_sheet_codes or [])}
-
     try:
-        words = _extract_plan_words(pdf_page)
+        chars = pdf_page.chars
     except Exception as exc:
         raise FixtureCountError(
-            f"Failed to extract text from plan {sheet}: {exc}"
+            f"Failed to extract characters from plan {sheet}: {exc}"
         ) from exc
 
-    if not words:
-        logger.warning(
-            "No text elements found on plan %s after exclusion filtering", sheet
-        )
+    if not chars:
+        logger.warning("No characters found on plan %s", sheet)
         return {code: 0 for code in fixture_codes}
 
-    counts: dict[str, int] = {}
-    for code in fixture_codes:
-        pattern = _build_code_pattern(code)
-        is_sheet_code = code.upper() in sheet_code_set
+    page_width = pdf_page.width
+    page_height = pdf_page.height
+    schedule_bbox = _find_schedule_table_bbox(pdf_page)
 
-        # Per-word matching with cross-reference filtering.
-        word_count = _count_word_matches_filtered(
-            words, code, pattern, is_sheet_code,
+    # --- Step 1: character-level detection for every code ---
+    all_matches: dict[str, list[dict[str, Any]]] = {}
+    for code in fixture_codes:
+        all_matches[code] = _find_char_sequences(
+            chars, code, page_width, page_height, schedule_bbox,
         )
 
-        if not is_sheet_code:
-            # Also try concatenated text match (catches codes split across
-            # word elements). Only for non-sheet-code fixtures since we
-            # can't do context filtering on concatenated text.
-            all_text = " ".join(w["text"] for w in words)
-            text_count = len(pattern.findall(all_text))
-            final_count = max(text_count, word_count)
-        else:
-            final_count = word_count
+    # --- Step 2: modal font-size filtering ---
+    all_matches = _apply_font_size_filter(all_matches)
 
-        counts[code] = final_count
+    # --- Step 3: cross-reference filtering for sheet-code fixtures ---
+    sheet_code_set = {c.upper() for c in (plan_sheet_codes or [])}
+    if sheet_code_set:
+        words: list[dict[str, Any]] | None = None  # lazy-load
+        for code in fixture_codes:
+            if code.upper() not in sheet_code_set:
+                continue
+            if words is None:
+                words = _extract_plan_words(pdf_page, schedule_bbox)
+            before = len(all_matches[code])
+            all_matches[code] = [
+                m for m in all_matches[code]
+                if not _is_near_crossref(m, words)
+            ]
+            removed = before - len(all_matches[code])
+            if removed:
+                logger.debug(
+                    "Cross-ref filter removed %d/%d matches for %s on %s",
+                    removed, before, code, sheet,
+                )
 
-        if final_count > 0:
+    # --- Build final counts ---
+    counts: dict[str, int] = {}
+    for code in fixture_codes:
+        counts[code] = len(all_matches[code])
+        if counts[code] > 0:
             logger.debug(
                 "Plan %s: fixture %s found %d times%s",
-                sheet, code, final_count,
-                " (sheet-code filtered)" if is_sheet_code else "",
+                sheet, code, counts[code],
+                " (sheet-code filtered)" if code.upper() in sheet_code_set else "",
             )
 
     total = sum(counts.values())

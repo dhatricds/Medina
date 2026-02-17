@@ -287,10 +287,12 @@ def _classify_from_title_block(page: Any) -> PageType | None:
     width = page.width
     height = page.height
 
-    # Crop to title block area (bottom-right)
+    # Crop to title block area (bottom-right).
+    # Use bottom 15% (not 20%) to avoid capturing sheet index listings
+    # that may appear just above the title block on symbols/cover pages.
     bbox = (
         width * 0.55,
-        height * 0.80,
+        height * 0.85,
         width,
         height,
     )
@@ -320,6 +322,10 @@ def _classify_from_title_block(page: Any) -> PageType | None:
             PageType.OTHER,
         ),
         (
+            ["electrical symbols", "abbreviation", "legend"],
+            PageType.SYMBOLS_LEGEND,
+        ),
+        (
             [
                 "panel schedule", "panelboard schedule",
             ],
@@ -340,10 +346,6 @@ def _classify_from_title_block(page: Any) -> PageType | None:
                 "electrical schedules",
             ],
             PageType.SCHEDULE,
-        ),
-        (
-            ["electrical symbols", "abbreviation", "legend"],
-            PageType.SYMBOLS_LEGEND,
         ),
         (
             ["enlarged electrical room", "electrical room plan"],

@@ -70,7 +70,9 @@ def run(source: str, work_dir: str) -> dict:
     # --- VLM fallback for plans with all-zero geometric counts ---
     config = get_config()
     if config.anthropic_api_key and all_keynotes:
-        keynote_numbers = [str(kn.number) for kn in all_keynotes]
+        keynote_numbers = list(dict.fromkeys(
+            str(kn.number) for kn in all_keynotes
+        ))
 
         plans_needing_vlm = []
         for pinfo in plan_pages:

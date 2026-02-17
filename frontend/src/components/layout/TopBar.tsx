@@ -28,7 +28,7 @@ export default function TopBar() {
         {projectData && (
           <div className="text-[13px] text-slate-400">
             <div className="text-white font-semibold text-sm">{projectData.project_name}</div>
-            <div>{projectData.sheet_index.length} sheets</div>
+            <div>{projectData.total_pages ?? projectData.pages?.length ?? projectData.sheet_index.length} sheets</div>
           </div>
         )}
       </div>

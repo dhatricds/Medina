@@ -259,6 +259,19 @@ def extract_schedule_vlm(
         if fixture:
             fixtures.append(fixture)
 
+    # Filter out panel schedule entries that VLM may extract despite
+    # instructions.  Panel circuit numbers are purely numeric with
+    # non-lighting descriptions.
+    if fixtures:
+        from medina.schedule.parser import _looks_like_panel_schedule
+        if _looks_like_panel_schedule(fixtures):
+            logger.warning(
+                "VLM results for %s look like panel schedule entries "
+                "(mostly numeric codes) — discarding %d entries",
+                sheet, len(fixtures),
+            )
+            fixtures = []
+
     logger.info(
         "VLM extracted %d fixture(s) from schedule on %s",
         len(fixtures),

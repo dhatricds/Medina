@@ -42,8 +42,17 @@ export interface ProjectSummary {
   total_keynotes: number;
 }
 
+export interface PageEntry {
+  page_number: number;
+  sheet_code: string;
+  description: string;
+  type: string;
+}
+
 export interface ProjectData {
   project_name: string;
+  total_pages?: number;
+  pages?: PageEntry[];
   sheet_index: SheetIndexEntry[];
   lighting_plans: string[];
   schedule_pages: string[];

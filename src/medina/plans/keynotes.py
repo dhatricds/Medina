@@ -480,10 +480,11 @@ def extract_all_keynotes(
     pdf_pages: dict[int, Any],
     known_fixture_codes: list[str] | None = None,
 ) -> tuple[list[KeyNote], dict[str, dict[str, int]]]:
-    """Extract keynotes from all plan pages and merge results.
+    """Extract keynotes from all plan pages.
 
-    Keynotes with the same number across different plans are merged into
-    a single ``KeyNote`` object with per-plan counts.
+    Each page's keynotes are kept as separate entries — keynotes with
+    the same number but different text on different pages are NOT merged,
+    since each plan sheet can have its own set of keynotes.
 
     Args:
         plan_pages: List of page metadata for lighting plan pages.
@@ -491,11 +492,10 @@ def extract_all_keynotes(
         known_fixture_codes: Optional list of known fixture codes.
 
     Returns:
-        Tuple of ``(merged_keynotes, all_counts)`` where
+        Tuple of ``(all_keynotes, all_counts)`` where
         ``all_counts = {sheet_code: {keynote_number: count}}``.
     """
-    # Merged keynotes keyed by number (as string).
-    merged: dict[str, KeyNote] = {}
+    all_keynotes: list[KeyNote] = []
     all_counts: dict[str, dict[str, int]] = {}
 
     for page_info in plan_pages:
@@ -519,45 +519,25 @@ def extract_all_keynotes(
             continue
 
         all_counts[sheet] = page_counts
+        all_keynotes.extend(page_keynotes)
 
-        # Merge keynotes: if the same number already exists, update its
-        # per-plan counts and accumulate fixture references.
-        for kn in page_keynotes:
-            num_str = str(kn.number)
-            if num_str in merged:
-                existing = merged[num_str]
-                existing.counts_per_plan[sheet] = kn.counts_per_plan.get(
-                    sheet, 0
-                )
-                existing.total = sum(existing.counts_per_plan.values())
-                # Merge fixture references (deduplicate).
-                for ref in kn.fixture_references:
-                    if ref not in existing.fixture_references:
-                        existing.fixture_references.append(ref)
-                # Use the longer text if they differ (more complete).
-                if len(kn.text) > len(existing.text):
-                    existing.text = kn.text
-            else:
-                merged[num_str] = kn
-
-    # Ensure all merged keynotes have entries for all plans (0 if absent).
+    # Sort by sheet (plan order), then by keynote number.
     all_sheets = [
         p.sheet_code or f"page_{p.page_number}" for p in plan_pages
     ]
-    for kn in merged.values():
-        for sheet in all_sheets:
-            if sheet not in kn.counts_per_plan:
-                kn.counts_per_plan[sheet] = 0
-        kn.total = sum(kn.counts_per_plan.values())
+    sheet_order = {s: i for i, s in enumerate(all_sheets)}
 
-    # Sort by keynote number.
-    sorted_keynotes = sorted(
-        merged.values(),
-        key=lambda k: (int(k.number) if str(k.number).isdigit() else 0),
-    )
+    def sort_key(kn: KeyNote) -> tuple[int, int]:
+        # First plan this keynote belongs to determines sheet order.
+        first_sheet = next(iter(kn.counts_per_plan), "")
+        sheet_idx = sheet_order.get(first_sheet, 999)
+        num = int(kn.number) if str(kn.number).isdigit() else 0
+        return (sheet_idx, num)
+
+    all_keynotes.sort(key=sort_key)
 
     logger.info(
-        "Extracted %d unique keynotes across %d plan pages",
-        len(sorted_keynotes), len(plan_pages),
+        "Extracted %d keynotes across %d plan pages",
+        len(all_keynotes), len(plan_pages),
     )
-    return sorted_keynotes, all_counts
+    return all_keynotes, all_counts

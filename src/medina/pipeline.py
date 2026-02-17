@@ -182,13 +182,12 @@ def run_pipeline(
             )
 
     # VLM fallback: if pdfplumber found no fixtures but schedule pages
-    # exist, check if the pages have rasterized/image content and use
-    # Claude Vision to extract the schedule.
+    # exist, try VLM on each schedule page.  Covers both rasterized
+    # pages and pages with tables whose column headers don't match
+    # expected patterns (e.g., non-standard luminaire schedules).
     if not fixtures and schedule_pages_info and config.anthropic_api_key:
         from medina.schedule.vlm_extractor import (
             extract_schedule_vlm,
-            has_image_based_content,
-            has_minimal_text,
         )
         from medina.pdf.renderer import render_page_to_image
 
@@ -197,18 +196,14 @@ def run_pipeline(
             if spdf is None:
                 continue
 
-            is_image_page = has_image_based_content(spdf)
-            is_sparse_text = has_minimal_text(spdf)
-
-            if is_image_page or is_sparse_text:
-                sheet_label = (
-                    spage.sheet_code or str(spage.page_number)
-                )
-                report(
-                    "SCHEDULE",
-                    f"Schedule page {sheet_label} has image-based "
-                    f"content — using VLM extraction",
-                )
+            sheet_label = (
+                spage.sheet_code or str(spage.page_number)
+            )
+            report(
+                "SCHEDULE",
+                f"pdfplumber found 0 fixtures on {sheet_label} "
+                f"— trying VLM fallback",
+            )
                 try:
                     # Use higher DPI for schedule pages — fixture
                     # codes like AL1 vs A1 need clear resolution.

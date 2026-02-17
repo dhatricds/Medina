@@ -12,6 +12,13 @@ import {
 } from '../api/client';
 import type { SourceItem } from '../api/client';
 
+/** Derive page count: prefer total_pages from backend, fall back to sheet_index length. */
+function getPageCount(data: ProjectData): number {
+  if (data.total_pages && data.total_pages > 0) return data.total_pages;
+  if (data.pages && data.pages.length > 0) return data.pages.length;
+  return data.sheet_index.length;
+}
+
 const defaultAgents: AgentInfo[] = [
   { id: 1, name: 'Search Agent', description: 'Load, discover, classify pages', status: 'pending', stats: {} },
   { id: 2, name: 'Schedule Agent', description: 'Extract fixture specs from schedule', status: 'pending', stats: {} },
@@ -26,7 +33,7 @@ function buildDemoAgents(data: ProjectData): AgentInfo[] {
       id: 1, name: 'Search Agent', description: 'Load, discover, classify pages',
       status: 'completed', time: 2.3,
       stats: {
-        'Pages': data.sheet_index.length,
+        'Pages': getPageCount(data),
         'Plans found': data.lighting_plans.length,
         'Schedules': data.schedule_pages.length,
       },
@@ -193,7 +200,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         editCount: 0,
         projectId: null,
         currentPage: 1,
-        totalPages: data.sheet_index.length,
+        totalPages: getPageCount(data),
         error: null,
       });
     } catch {
@@ -210,7 +217,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           editCount: 0,
           projectId: null,
           currentPage: 1,
-          totalPages: data.sheet_index.length,
+          totalPages: getPageCount(data),
           error: null,
         });
       } catch {
@@ -273,7 +280,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         projectData: data,
         appState: 'complete',
         sseActive: false,
-        totalPages: data.sheet_index.length,
+        totalPages: getPageCount(data),
         currentPage: 1,
       });
     } catch (e) {

@@ -286,7 +286,12 @@ _NON_LUMINAIRE_TABLE_KEYWORDS = [
     "revision",
     "ceiling fan sched",
     "energy compliance",
+    "circuit description",
 ]
+
+# Regex patterns that indicate a panel/breaker schedule table header.
+# "PANEL A", "PANEL B", "PANEL 1", "PANEL LP-1", etc.
+_PANEL_HEADER_RE = re.compile(r"\bpanel\s+[a-z0-9]", re.IGNORECASE)
 
 
 _LUMINAIRE_TABLE_KEYWORDS = [
@@ -316,8 +321,30 @@ def _is_luminaire_table(raw_table: list[list[str]]) -> bool:
         if keyword in header_text:
             return False
 
+    # Negative match: regex-based panel header detection
+    # Catches "PANEL A", "PANEL B", "PANEL LP-1", etc.
+    if _PANEL_HEADER_RE.search(header_text):
+        return False
+
     # Ambiguous: allow through (parser will try to find fixture columns)
     return True
+
+
+def _looks_like_panel_schedule(fixtures: list[FixtureRecord]) -> bool:
+    """Detect if parsed fixtures are actually panel schedule circuit entries.
+
+    Panel schedules have mostly numeric codes (circuit numbers like 1, 3, 5).
+    Luminaire schedules have alphanumeric codes (A1, AL1, B6, EX1).
+    If ≥60% of codes are purely numeric AND there are more than 5 entries,
+    the table is almost certainly a panel schedule.
+    """
+    if len(fixtures) <= 5:
+        return False
+    numeric_count = sum(
+        1 for f in fixtures if f.code.strip().isdigit()
+    )
+    ratio = numeric_count / len(fixtures)
+    return ratio >= 0.6
 
 
 def parse_schedule_table(
@@ -378,6 +405,18 @@ def parse_schedule_table(
             continue
         fixture = _row_to_fixture(row, col_map)
         fixtures.append(fixture)
+
+    # Post-parse validation: reject tables that look like panel schedules.
+    # Panel schedules have mostly/all numeric circuit codes (1, 3, 5, 7...).
+    # Luminaire schedules have alphanumeric codes (A1, AL1, B6, EX1).
+    if fixtures and _looks_like_panel_schedule(fixtures):
+        logger.info(
+            "Rejecting %d entries from table on %s — "
+            "codes look like panel circuit numbers, not fixture types",
+            len(fixtures),
+            source_page or "unknown",
+        )
+        return []
 
     logger.info(
         "Parsed %d fixture(s) from table on %s",

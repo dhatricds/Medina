@@ -668,10 +668,11 @@ tables = page.extract_tables(table_settings={
 - max_va: "MAX VA", "VA", "WATTS", "WATTAGE"
 
 **Fallback — VLM schedule extraction (`schedule/vlm_extractor.py`):**
-- Triggered when pdfplumber finds no fixtures but schedule pages exist AND the page has image-based/rasterized content
+- Triggered when pdfplumber finds no fixtures but schedule pages exist (any page type — not just image-based)
 - Renders the schedule page at 150 DPI (must stay under 5MB base64 API limit)
 - Sends to Claude Vision API with structured prompt to extract fixture table data
-- Used for scanned/image-only PDFs (e.g., DENIS project PDFs)
+- Post-processes VLM results: `_looks_like_panel_schedule()` rejects entries with mostly numeric codes (>60%, >5 entries)
+- Used for scanned/image-only PDFs and pages with non-standard table formats
 
 ### Stage 5: Fixture & Key Note Counting (Per-Plan)
 
@@ -908,7 +909,7 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 - **Stage 1 (LOAD)**: Single PDF and folder-of-PDFs loading working. Folder loader deduplicates by title-block sheet code (keeps latest revision, e.g., ADDM1 replaces original).
 - **Stage 2 (DISCOVER)**: Sheet index discovery from tables and text
 - **Stage 3 (CLASSIFY)**: 4-priority classification chain with title block analysis
-- **Stage 4 (SCHEDULE)**: pdfplumber table extraction + VLM fallback for image-based schedules. Combo pages supported (schedule tables embedded in plan pages). Parser maps "LUMINAIRE TYPE" → description, "LUMEN/WATTS" → lumens.
+- **Stage 4 (SCHEDULE)**: pdfplumber table extraction + VLM fallback for any schedule page where pdfplumber finds 0 fixtures. Combo pages supported (schedule tables embedded in plan pages). Parser maps "LUMINAIRE TYPE" → description, "LUMEN/WATTS" → lumens. Panel schedule tables detected and rejected via keyword matching ("PANEL A/B", "circuit description"), regex header detection, and post-parse numeric code validation.
 - **Stage 5 (COUNT)**: Text-based fixture counting with schedule table exclusion (combo pages) and cross-reference filtering (fixture codes matching sheet codes). Geometric keynote counting with "KEYED SHEET NOTES" pattern support. Validated exact match on HCMC and Anoka keynotes.
 - **Stage 6 (QA)**: Confidence scoring with per-stage breakdown
 - **Stage 7 (OUTPUT)**: Excel and JSON generation with dynamic columns
@@ -920,30 +921,33 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 | HCMC (24031_15_Elec.pdf) | Single PDF | E200 | E600 | 13 types | #1=6,#2=1,#3=1 | 98% Pass | 9/13 fixture counts match GT, 4 off by 1-2 |
 | Anoka Dispensary | Single PDF | E301 | E901 | 10 types | #1=4,#2=1 | 97% Pass | 6/10 fixture counts match, short codes overcount |
 | Dental Hygiene Lab | Single PDF | - | - | 0 (garbled text) | - | 97.8% Pass (vacuous) | Needs OCR/VLM fallback |
+| DENIS 12E2 | Single PDF | E1.1, E1.2 | E4.1, E4.2 | 5 types (A6,B1,D6,E1,F4) | - | - | E0.0 misclassification fixed |
 
-#### HCMC Fixture Count Detail
+#### HCMC Fixture Count Detail (after char-level fix)
 | Code | Pipeline | Ground Truth | Delta |
 |------|----------|-------------|-------|
-| A1 | 46 | 48 | -2 |
+| A1 | 48 | 48 | Match |
 | A6 | 14 | 14 | Match |
 | B1 | 4 | 4 | Match |
 | B6 | 26 | 25 | +1 |
 | C4 | 1 | 1 | Match |
 | D6 | 8 | N/A | Extra type in schedule |
 | D7 | 1 | 1 | Match |
-| E3 | 5 | 4 | +1 |
-| E4 | 4 | 3 | +1 |
+| E3 | 4 | 4 | Match |
+| E4 | 3 | 3 | Match |
 | L5 | 3 | 3 | Match |
 | U2 | 2 | 2 | Match |
 | U3 | 7 | 7 | Match |
 | U4 | 4 | 4 | Match |
 
-#### Anoka Fixture Count Detail
+**11/12 exact matches** (was 9/12 before char-level fix). Remaining: B6 +1.
+
+#### Anoka Fixture Count Detail (after legend-column exclusion fix)
 | Code | Pipeline | Ground Truth | Delta |
 |------|----------|-------------|-------|
-| A | 17 | 14 | +3 |
-| B | 11 | 10 | +1 |
-| C | 3 | 2 | +1 |
+| A | 15 | 14 | +1 |
+| B | 10 | 10 | Match |
+| C | 2 | 2 | Match |
 | D | 9 | 10 | -1 |
 | D1 | 1 | 1 | Match |
 | EG | 1 | 1 | Match |
@@ -951,6 +955,8 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 | F | 7 | 7 | Match |
 | W1 | 4 | 4 | Match |
 | W2 | 2 | 2 | Match |
+
+**8/10 exact matches** (was 7/10 before legend-column fix). C fixed by removing PE stamp match "PHILIP C. HAIGHT". A closer by 1 (stamp text "I AM A DULY"). Remaining diffs are short-code ambiguity (BUG-003).
 
 ### Known Issues Found by Validation
 - **Variable shadowing bug (FIXED)**: `plan_codes` in `pipeline.py` was being overwritten by fixture cross-referencing. Renamed to `found_plan_codes`.
@@ -960,16 +966,23 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 - **Sheet code cross-references (FIXED)**: Fixture codes that match plan sheet codes (e.g., E1A is both a fixture type and a sheet code in Johanna Fire) now filtered by checking preceding words for cross-reference indicators ("SEE", "SHEET", "REFER", "PLAN", etc.).
 - **Folder addendum deduplication (FIXED)**: Folder loader now reads title-block sheet codes and deduplicates — when multiple files have the same sheet code (e.g., original + ADDM1 addendum), only the latest revision (highest file number) is kept.
 - **Keynote header variations (FIXED)**: Added "KEYED SHEET NOTES" / "KEYED SHEET NOTE" patterns to keynotes.py header detection (Elk River uses this label).
+- **Legend column text overcounting (FIXED)**: Fixture codes referenced in KEY NOTES text descriptions (e.g., "TYPE 'AL1'") and engineer certification stamps (e.g., "PHILIP C. HAIGHT") were counted as fixtures. Fixed by adding a legend column exclusion zone at rightmost 15% of page width (`_LEGEND_COL_X_FRAC = 0.85`).
 - **Short fixture code overcounting**: Single/two-char codes (A, B, C, D, E3, E4) match room labels and circuit identifiers on plan pages. Vision-based counting would improve accuracy for short codes.
-- **A1 undercounting by 2 (HCMC)**: Some fixtures may be missed when labels overlap with other annotations.
+- **A1 undercounting (FIXED)**: Was caused by `extract_words()` splitting "A1" into "A"+"1". Fixed by switching to character-level counting.
+- **E3 overcounting (FIXED)**: Grid line label "E3" (21.6pt) was counted as fixture. Fixed by modal font-size filtering.
 - **No sheet index for some PDFs**: Anoka has no discoverable sheet index, lowering the confidence score for that stage to 85%.
 - **DENIS 11CD — 0 schedule pages**: Sheet index lists E500 as schedule but classifier can't match any page to that code (pages show as `?` / `other`). Image-based PDFs need VLM page classification fallback.
+- **Panel schedule extraction (FIXED)**: Parser was accepting panel schedule circuit entries (numeric codes 1,3,5,7...) as fixture codes. Fixed with keyword detection ("PANEL A/B", "circuit description"), regex panel header matching, and `_looks_like_panel_schedule()` post-parse validation. Also applied to VLM extractor output.
+- **Title block crop too wide (FIXED)**: Crop area `(0.55, 0.80)` captured sheet index listings above the title block on E0.0 pages, causing misclassification. Tightened to `(0.55, 0.85)`.
+- **Symbols/legend keyword priority (FIXED)**: In `_TITLE_KEYWORDS`, symbols/legend keywords now checked before schedule keywords to prevent symbols pages from being classified as schedule.
+- **VLM schedule fallback too restrictive (FIXED)**: Was gated by `has_image_based_content` / `has_minimal_text`. Now triggers for any schedule page when pdfplumber finds 0 fixtures.
+- **Per-page keynote merging bug (FIXED)**: `extract_all_keynotes()` merged keynotes by number across pages, losing per-page text when different pages had different keynotes with same numbers. Now keeps per-page keynotes separate.
 
 ### In Progress (Agent Team Validation)
 - **Elk River Gym** (folder input, 2 plans after dedup) — schedule on combo page, 2 fixture types (G18, G22), 3 keynotes. Testing cross-ref filtering.
 - **Johanna Fire** (folder, 4 lighting plans) — 28 fixture types, fixture codes overlap with sheet codes (E1A, E1B, E2A, E2B). Testing cross-reference filtering.
 - **Waterville Fire** (folder input) — testing in progress
-- **DENIS PDFs** (8 standalone PDFs, image-based schedules) — VLM prompt improved for fixture code accuracy, testing in progress
+- **DENIS PDFs** (8 standalone PDFs, image-based schedules) — VLM prompt improved for fixture code accuracy. Panel schedule rejection and VLM fallback fixes applied.
 
 ### Key Technical Decisions
 1. **Geometric shape detection over VLM for keynotes**: After extensive testing (7+ VLM prompt iterations), pdfplumber line geometry proved far more reliable than Claude Vision for counting small diamond-enclosed numbers. VLM is inconsistent (0 to 24 for same image across runs). Geometric detection gives exact match.
