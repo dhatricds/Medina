@@ -67,7 +67,10 @@ def run(source: str, work_dir: str) -> dict:
             plan_pages, pdf_pages, fixture_codes or None,
         )
 
-    # --- VLM fallback for plans with all-zero geometric counts ---
+    # --- VLM fallback for plans with low keynote counts ---
+    # Triggers when: (a) all counts are zero, or (b) total count is
+    # suspiciously low relative to the number of keynotes defined on
+    # that page (indicates geometric/text detection failed).
     config = get_config()
     if config.anthropic_api_key and all_keynotes:
         keynote_numbers = list(dict.fromkeys(
@@ -78,9 +81,15 @@ def run(source: str, work_dir: str) -> dict:
         for pinfo in plan_pages:
             code = pinfo.sheet_code or str(pinfo.page_number)
             page_counts = all_keynote_counts.get(code, {})
-            if not any(
-                page_counts.get(n, 0) > 0 for n in keynote_numbers
-            ):
+            # Keynote numbers defined for this specific plan
+            plan_kn_nums = [
+                n for n in page_counts if page_counts.get(n) is not None
+            ]
+            total = sum(page_counts.get(n, 0) for n in plan_kn_nums)
+            num_keynotes = len(plan_kn_nums) or len(keynote_numbers)
+            # Trigger VLM if total count < number of keynotes
+            # (each keynote should appear at least once on average)
+            if total < num_keynotes:
                 plans_needing_vlm.append(pinfo)
 
         if plans_needing_vlm:

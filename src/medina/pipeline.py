@@ -204,57 +204,57 @@ def run_pipeline(
                 f"pdfplumber found 0 fixtures on {sheet_label} "
                 f"— trying VLM fallback",
             )
-                try:
-                    # Use higher DPI for schedule pages — fixture
-                    # codes like AL1 vs A1 need clear resolution.
-                    # Start at 200 DPI and reduce if too large.
-                    sched_dpi = min(config.render_dpi, 200)
+            try:
+                # Use higher DPI for schedule pages — fixture
+                # codes like AL1 vs A1 need clear resolution.
+                # Start at 200 DPI and reduce if too large.
+                sched_dpi = min(config.render_dpi, 200)
+                img_bytes = render_page_to_image(
+                    spage.source_path,
+                    spage.pdf_page_index,
+                    dpi=sched_dpi,
+                )
+                # Check base64 size and reduce DPI if needed
+                import base64
+                b64_size = len(base64.b64encode(img_bytes))
+                while b64_size > 5_000_000 and sched_dpi > 72:
+                    sched_dpi = max(72, sched_dpi - 20)
+                    logger.info(
+                        "Image too large (%d bytes), "
+                        "retrying at %d DPI",
+                        b64_size, sched_dpi,
+                    )
                     img_bytes = render_page_to_image(
                         spage.source_path,
                         spage.pdf_page_index,
                         dpi=sched_dpi,
                     )
-                    # Check base64 size and reduce DPI if needed
-                    import base64
-                    b64_size = len(base64.b64encode(img_bytes))
-                    while b64_size > 5_000_000 and sched_dpi > 72:
-                        sched_dpi = max(72, sched_dpi - 20)
-                        logger.info(
-                            "Image too large (%d bytes), "
-                            "retrying at %d DPI",
-                            b64_size, sched_dpi,
-                        )
-                        img_bytes = render_page_to_image(
-                            spage.source_path,
-                            spage.pdf_page_index,
-                            dpi=sched_dpi,
-                        )
-                        b64_size = len(
-                            base64.b64encode(img_bytes)
-                        )
-                    vlm_fixtures = extract_schedule_vlm(
-                        spage, img_bytes, config,
-                        plan_codes_hint=(
-                            found_plan_codes if found_plan_codes
-                            else None
-                        ),
+                    b64_size = len(
+                        base64.b64encode(img_bytes)
                     )
-                    fixtures.extend(vlm_fixtures)
-                    report(
-                        "SCHEDULE",
-                        f"VLM extracted {len(vlm_fixtures)} fixture "
-                        f"types from {sheet_label}",
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "VLM schedule extraction failed for %s: %s",
-                        sheet_label,
-                        e,
-                    )
-                    report(
-                        "SCHEDULE",
-                        f"VLM extraction failed for {sheet_label}: {e}",
-                    )
+                vlm_fixtures = extract_schedule_vlm(
+                    spage, img_bytes, config,
+                    plan_codes_hint=(
+                        found_plan_codes if found_plan_codes
+                        else None
+                    ),
+                )
+                fixtures.extend(vlm_fixtures)
+                report(
+                    "SCHEDULE",
+                    f"VLM extracted {len(vlm_fixtures)} fixture "
+                    f"types from {sheet_label}",
+                )
+            except Exception as e:
+                logger.warning(
+                    "VLM schedule extraction failed for %s: %s",
+                    sheet_label,
+                    e,
+                )
+                report(
+                    "SCHEDULE",
+                    f"VLM extraction failed for {sheet_label}: {e}",
+                )
 
     report("SCHEDULE", f"Extracted {len(fixtures)} fixture types")
 
@@ -376,14 +376,22 @@ def run_pipeline(
                 str(kn.number) for kn in all_keynotes
             ]
 
-            # Check if any plan has all-zero keynote counts
-            # (geometric detection found nothing).
+            # Check if any plan has low keynote counts — triggers when
+            # total count < number of keynotes (geometric/text detection
+            # likely failed if each keynote isn't found at least once).
             plans_needing_vlm = []
             for pinfo in plan_pages_info:
                 code = pinfo.sheet_code or str(pinfo.page_number)
                 page_counts = all_keynote_counts.get(code, {})
-                if not any(page_counts.get(n, 0) > 0
-                           for n in keynote_numbers):
+                plan_kn_nums = [
+                    n for n in page_counts
+                    if page_counts.get(n) is not None
+                ]
+                total = sum(
+                    page_counts.get(n, 0) for n in plan_kn_nums
+                )
+                num_kn = len(plan_kn_nums) or len(keynote_numbers)
+                if total < num_kn:
                     plans_needing_vlm.append(pinfo)
 
             if plans_needing_vlm:

@@ -349,20 +349,91 @@ def _count_keynote_text_only(
     return counts
 
 
+def _find_keynotes_header_x(words: list[Any]) -> float | None:
+    """Find the x0 position of the KEY NOTES header using word positions.
+
+    Searches for "KEY" followed by "NOTES" (or similar patterns) in
+    the word list.  Returns the x0 of the first word in the header,
+    or ``None`` if not found.
+    """
+    for i, w in enumerate(words):
+        upper = w["text"].upper().strip()
+        # Single-word headers: "KEYNOTES", "KEYNOTES:"
+        if upper in ("KEYNOTES", "KEYNOTES:"):
+            return w["x0"]
+        # Multi-word headers: "KEY NOTES:", "KEYED NOTES:", etc.
+        if upper in ("KEY", "KEYED"):
+            # Check the next few words for "NOTES" / "SHEET"
+            for j in range(1, 4):
+                if i + j >= len(words):
+                    break
+                nw = words[i + j]
+                # Must be on same line (close y) and nearby x
+                if (abs(nw["top"] - w["top"]) < 5
+                        and nw["x0"] - w["x1"] < 30):
+                    if "NOTE" in nw["text"].upper():
+                        return w["x0"]
+                    if "SHEET" in nw["text"].upper():
+                        # "KEYED SHEET NOTES" — keep looking
+                        continue
+                else:
+                    break
+    return None
+
+
+def _has_keynote_content(text: str) -> bool:
+    """Check if text has a keynotes header AND at least one numbered entry.
+
+    Uses a stricter entry regex (1-2 digit numbers only) to avoid false
+    positives from addresses, dates, or other multi-digit numbers.
+    """
+    if not any(p.search(text) for p in _KEYNOTES_HEADER_PATTERNS):
+        return False
+    # Strict: only 1-2 digit numbers qualify as keynote entries.
+    strict_entry = re.compile(
+        r'^\s*(\d{1,2})\s*[.):\-]?\s+([A-Z].+)', re.MULTILINE,
+    )
+    return bool(strict_entry.search(text))
+
+
 def _extract_keynotes_region_text(pdf_page: Any) -> str:
     """Extract text from the keynotes region of the page.
 
-    Keynotes are typically in the right portion of the page
-    (right ~30%), above the title block. We crop to this area
-    to avoid mixing with drawing text from the left side.
+    Uses a two-stage approach:
+    1. Find the KEY NOTES header position using word extraction, then
+       crop tightly around the header column.  This prevents drawing-area
+       text (cross-references, fixture labels) from bleeding in.
+    2. Fall back to progressively wider right-side crops if the header
+       position cannot be determined or the tight crop misses entries.
 
-    Falls back to full-page text if the cropped region yields nothing.
+    Falls back to full-page text if no cropped region yields keynotes.
     """
     width = pdf_page.width
     height = pdf_page.height
 
-    # Try right-side crop (keynotes legend area)
-    # Typically right 30%, top 90% (avoiding title block)
+    # Stage 1: Header-aware tight crop
+    try:
+        words = pdf_page.extract_words(x_tolerance=3, y_tolerance=3)
+        header_x = _find_keynotes_header_x(words)
+        if header_x is not None:
+            crop_left = max(0, header_x - 30)
+            bbox = (crop_left, 0, width, height * 0.85)
+            try:
+                cropped = pdf_page.within_bbox(bbox)
+                text = cropped.extract_text() or ""
+                if _has_keynote_content(text):
+                    logger.debug(
+                        "Keynotes found via header-aware crop "
+                        "(x0=%.0f, header_x=%.0f)",
+                        crop_left, header_x,
+                    )
+                    return text
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Stage 2: Fixed right-side crop (fallback)
     regions = [
         (width * 0.70, 0, width, height * 0.85),    # Right 30%, top 85%
         (width * 0.65, 0, width, height * 0.85),    # Right 35%, top 85%
@@ -376,9 +447,7 @@ def _extract_keynotes_region_text(pdf_page: Any) -> str:
         except Exception:
             continue
 
-        if text and any(
-            p.search(text) for p in _KEYNOTES_HEADER_PATTERNS
-        ):
+        if _has_keynote_content(text):
             logger.debug(
                 "Keynotes found in cropped region "
                 "(x0=%.0f, y0=%.0f, x1=%.0f, y1=%.0f)",
