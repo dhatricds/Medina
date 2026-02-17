@@ -1,9 +1,9 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useMemo } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 import { useProjectStore } from '../../store/projectStore';
-import { getPdfUrl, getPageImageUrl } from '../../api/client';
+import { getPagePdfUrl, getPageImageUrl } from '../../api/client';
 
 // Configure pdf.js worker from CDN
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -15,7 +15,6 @@ const ZOOM_STEP = 0.25;
 export default function PdfViewer() {
   const { projectData, projectId, currentPage, totalPages, setCurrentPage, appState } = useProjectStore();
   const [zoom, setZoom] = useState(1);
-  const [numPages, setNumPages] = useState<number | null>(null);
   const [pdfError, setPdfError] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
@@ -40,6 +39,7 @@ export default function PdfViewer() {
   const goToPrev = useCallback(() => {
     if (currentPage > 1) {
       setZoom(1);
+      setPdfError(false);
       setCurrentPage(currentPage - 1);
     }
   }, [currentPage, setCurrentPage]);
@@ -47,6 +47,7 @@ export default function PdfViewer() {
   const goToNext = useCallback(() => {
     if (currentPage < totalPages) {
       setZoom(1);
+      setPdfError(false);
       setCurrentPage(currentPage + 1);
     }
   }, [currentPage, totalPages, setCurrentPage]);
@@ -75,8 +76,7 @@ export default function PdfViewer() {
     }
   }, []);
 
-  const onDocumentLoadSuccess = useCallback(({ numPages: n }: { numPages: number }) => {
-    setNumPages(n);
+  const onDocumentLoadSuccess = useCallback(() => {
     setPdfError(false);
   }, []);
 
@@ -85,8 +85,21 @@ export default function PdfViewer() {
   }, []);
 
   const zoomPercent = Math.round(zoom * 100);
-  const pdfUrl = hasProject ? getPdfUrl(projectId) : null;
+
+  // Per-page PDF URL — each page is served as a standalone single-page PDF
+  // for vector-quality rendering. Key changes on page navigation to reload.
+  const pagePdfUrl = useMemo(
+    () => (hasProject ? getPagePdfUrl(projectId, currentPage) : null),
+    [hasProject, projectId, currentPage],
+  );
+
   const pageWidth = containerWidth > 0 ? containerWidth * zoom : undefined;
+
+  // Image fallback: scale DPI with zoom for crisp rendering at all zoom levels
+  const imageDpi = useMemo(
+    () => Math.min(600, Math.round(150 * zoom * (window.devicePixelRatio || 1))),
+    [zoom],
+  );
 
   return (
     <div className="flex-1 flex flex-col">
@@ -159,9 +172,10 @@ export default function PdfViewer() {
           className="flex items-center justify-center"
           style={{ minHeight: '100%', minWidth: '100%' }}
         >
-          {pdfUrl && !pdfError ? (
+          {pagePdfUrl && !pdfError ? (
             <Document
-              file={pdfUrl}
+              key={`${projectId}-${currentPage}`}
+              file={pagePdfUrl}
               onLoadSuccess={onDocumentLoadSuccess}
               onLoadError={onDocumentLoadError}
               loading={
@@ -172,21 +186,22 @@ export default function PdfViewer() {
               }
             >
               <Page
-                pageNumber={currentPage}
+                pageNumber={1}
                 width={pageWidth}
-                renderTextLayer={true}
-                renderAnnotationLayer={true}
+                renderTextLayer={false}
+                renderAnnotationLayer={false}
                 loading={
                   <div className="text-slate-500 text-sm">Rendering page...</div>
                 }
               />
             </Document>
           ) : hasProject && pdfError ? (
-            /* Fallback to image-based rendering for folder projects */
+            /* Fallback: image rendering with DPI scaled to zoom level */
             <img
-              src={getPageImageUrl(projectId, currentPage, 300)}
+              key={`img-${currentPage}-${imageDpi}`}
+              src={getPageImageUrl(projectId, currentPage, imageDpi)}
               alt={`Page ${currentPage}`}
-              className="object-contain rounded shadow-lg transition-transform duration-150"
+              className="object-contain rounded shadow-lg"
               style={{
                 width: `${zoom * 100}%`,
                 maxWidth: 'none',

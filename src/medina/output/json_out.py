@@ -64,13 +64,16 @@ def build_json_output(result: ExtractionResult) -> dict:
         }
 
     # Build a page list from pages (always available) so frontend can navigate
-    # even when the sheet index is empty.
+    # even when the sheet index is empty.  Include source_path and
+    # pdf_page_index so the per-page PDF endpoint can resolve folder projects.
     pages_data = [
         {
             "page_number": p.page_number,
             "sheet_code": p.sheet_code or f"Page {p.page_number}",
             "description": p.sheet_title or "",
             "type": p.page_type.value if hasattr(p.page_type, "value") else str(p.page_type),
+            "source_path": str(p.source_path),
+            "pdf_page_index": p.pdf_page_index,
         }
         for p in result.pages
     ]

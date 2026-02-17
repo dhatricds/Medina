@@ -71,6 +71,10 @@ export function getPageImageUrl(projectId: string, pageNumber: number, dpi = 150
   return `${BASE}/api/projects/${projectId}/page/${pageNumber}?dpi=${dpi}`;
 }
 
+export function getPagePdfUrl(projectId: string, pageNumber: number): string {
+  return `${BASE}/api/projects/${projectId}/page/${pageNumber}/pdf`;
+}
+
 export function getPdfUrl(projectId: string): string {
   return `${BASE}/api/projects/${projectId}/pdf`;
 }
