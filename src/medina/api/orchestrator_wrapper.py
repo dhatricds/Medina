@@ -133,7 +133,7 @@ def run_pipeline(project: ProjectState, use_vision: bool = False) -> dict:
         elif has_plans and not has_fixtures:
             # Plans exist but no fixtures — skip count, still run keynotes
             # Write empty count result so QA agent can read it
-            _write_empty_result(work_dir, "count_result.json", {"all_plan_counts": {}})
+            _write_empty_result(work_dir, "count_result.json", {"all_plan_counts": {}, "all_plan_positions": {}})
             _emit(project, "completed", {
                 "agent_id": 3, "agent_name": "Count Agent", "status": "completed",
                 "time": 0,
@@ -152,8 +152,8 @@ def run_pipeline(project: ProjectState, use_vision: bool = False) -> dict:
             })
         else:
             # No plans — skip both count and keynote
-            _write_empty_result(work_dir, "count_result.json", {"all_plan_counts": {}})
-            _write_empty_result(work_dir, "keynote_result.json", {"keynotes": [], "all_keynote_counts": {}})
+            _write_empty_result(work_dir, "count_result.json", {"all_plan_counts": {}, "all_plan_positions": {}})
+            _write_empty_result(work_dir, "keynote_result.json", {"keynotes": [], "all_keynote_counts": {}, "all_keynote_positions": {}})
             _emit(project, "completed", {
                 "agent_id": 3, "agent_name": "Count Agent", "status": "completed",
                 "time": 0,

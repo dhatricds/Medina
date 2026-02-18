@@ -61,11 +61,17 @@ def run(source: str, work_dir: str) -> dict:
     # --- Keynote extraction with geometric shape detection ---
     all_keynotes = []
     all_keynote_counts: dict[str, dict[str, int]] = {}
+    all_keynote_positions: dict[str, dict] = {}
 
     if plan_pages:
-        all_keynotes, all_keynote_counts = extract_all_keynotes(
+        kn_result = extract_all_keynotes(
             plan_pages, pdf_pages, fixture_codes or None,
+            return_positions=True,
         )
+        if len(kn_result) == 3:
+            all_keynotes, all_keynote_counts, all_keynote_positions = kn_result
+        else:
+            all_keynotes, all_keynote_counts = kn_result[0], kn_result[1]
 
     # --- VLM fallback for plans with low keynote counts ---
     # Triggers when: (a) all counts are zero, or (b) total count is
@@ -147,6 +153,7 @@ def run(source: str, work_dir: str) -> dict:
     result = {
         "keynotes": [kn.model_dump(mode="json") for kn in all_keynotes],
         "all_keynote_counts": all_keynote_counts,
+        "all_keynote_positions": all_keynote_positions,
     }
 
     out_file = work_path / "keynote_result.json"

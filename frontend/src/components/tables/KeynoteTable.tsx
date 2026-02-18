@@ -2,8 +2,10 @@ import { useProjectStore } from '../../store/projectStore';
 import EditableCell from './EditableCell';
 
 export default function KeynoteTable() {
-  const { projectData, updateKeynoteCount, addCorrection } = useProjectStore();
+  const { projectData, updateKeynoteCount, addCorrection, highlightKeynote, projectId } = useProjectStore();
   if (!projectData) return null;
+
+  const canHighlight = !!projectId;
 
   const plans = projectData.lighting_plans;
 
@@ -52,7 +54,13 @@ export default function KeynoteTable() {
                   const count = kn.counts_per_plan[plan] ?? 0;
                   return (
                     <tr key={kn.keynote_number} className="hover:bg-slate-100 group">
-                      <td className="px-3.5 py-2 text-left font-bold text-primary bg-slate-50 border-b border-r border-border group-hover:bg-blue-50">
+                      <td
+                        className={`px-3.5 py-2 text-left font-bold text-primary bg-slate-50 border-b border-r border-border group-hover:bg-blue-50 ${
+                          canHighlight ? 'cursor-pointer hover:text-amber-600 hover:underline' : ''
+                        }`}
+                        onClick={canHighlight ? () => highlightKeynote(kn.keynote_number, plan) : undefined}
+                        title={canHighlight ? `Click to locate keynote #${kn.keynote_number} on ${plan}` : undefined}
+                      >
                         {kn.keynote_number}
                       </td>
                       <td className="px-3.5 py-2 text-left text-[12px] text-text-main leading-snug border-b border-r border-border group-hover:bg-slate-50">
@@ -61,6 +69,7 @@ export default function KeynoteTable() {
                       <EditableCell
                         value={count}
                         onChange={(newVal) => handleCountChange(kn.keynote_number, plan, count, newVal)}
+                        onLocate={canHighlight && count > 0 ? () => highlightKeynote(kn.keynote_number, plan) : undefined}
                       />
                     </tr>
                   );

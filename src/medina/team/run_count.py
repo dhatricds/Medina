@@ -42,7 +42,7 @@ def run(source: str, work_dir: str, use_vision: bool = False) -> dict:
     fixture_codes = schedule_data["fixture_codes"]
     if not fixture_codes:
         logger.warning("[COUNT] No fixture codes to count")
-        result = {"all_plan_counts": {}}
+        result = {"all_plan_counts": {}, "all_plan_positions": {}}
         out_file = work_path / "count_result.json"
         with open(out_file, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2)
@@ -70,10 +70,16 @@ def run(source: str, work_dir: str, use_vision: bool = False) -> dict:
 
     # --- Text-based counting ---
     all_plan_counts: dict[str, dict[str, int]] = {}
+    all_plan_positions: dict[str, dict] = {}
     if plan_pages and fixture_codes:
-        all_plan_counts = count_all_plans(
+        counts_result = count_all_plans(
             plan_pages, pdf_pages, fixture_codes, plan_sheet_codes=plan_codes,
+            return_positions=True,
         )
+        if isinstance(counts_result, tuple):
+            all_plan_counts, all_plan_positions = counts_result
+        else:
+            all_plan_counts = counts_result
 
     # --- Vision-based counting ---
     # Triggers when:
@@ -160,7 +166,10 @@ def run(source: str, work_dir: str, use_vision: bool = False) -> dict:
             logger.warning("[COUNT] Vision counting failed: %s", e)
 
     # --- Save results ---
-    result = {"all_plan_counts": all_plan_counts}
+    result = {
+        "all_plan_counts": all_plan_counts,
+        "all_plan_positions": all_plan_positions,
+    }
 
     out_file = work_path / "count_result.json"
     with open(out_file, "w", encoding="utf-8") as f:

@@ -1,4 +1,4 @@
-import type { ProjectData, Correction, DashboardProject } from '../types';
+import type { ProjectData, Correction, DashboardProject, FixturePosition } from '../types';
 
 const BASE = import.meta.env.VITE_API_URL ?? '';
 
@@ -121,6 +121,22 @@ export async function deleteDashboardProject(id: string): Promise<void> {
 
 export function getDashboardExcelUrl(id: string): string {
   return `${BASE}/api/dashboard/${id}/export/excel`;
+}
+
+// --- Positions ---
+
+export interface PagePositionsResponse {
+  sheet_code?: string;
+  page_width?: number;
+  page_height?: number;
+  fixture_positions?: Record<string, FixturePosition[]>;
+  keynote_positions?: Record<string, FixturePosition[]>;
+  positions?: null;
+  reason?: string;
+}
+
+export function getPagePositions(projectId: string, pageNumber: number): Promise<PagePositionsResponse> {
+  return fetchJson(`/api/projects/${projectId}/page/${pageNumber}/positions`);
 }
 
 // --- SSE URL ---

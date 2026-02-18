@@ -38,7 +38,7 @@ def run(
     from medina.qa.confidence import compute_confidence
     from medina.qa.report import format_qa_report
     from medina.output.excel import write_excel
-    from medina.output.json_out import write_json
+    from medina.output.json_out import write_json, write_positions_json
     from medina.config import get_config
 
     source_path = Path(source)
@@ -76,10 +76,12 @@ def run(
     fixture_codes = schedule_data["fixture_codes"]
 
     all_plan_counts = count_data["all_plan_counts"]
+    all_plan_positions = count_data.get("all_plan_positions", {})
     all_keynotes = [
         KeyNote.model_validate(kn) for kn in keynote_data["keynotes"]
     ]
     all_keynote_counts = keynote_data["all_keynote_counts"]
+    all_keynote_positions = keynote_data.get("all_keynote_positions", {})
 
     # --- Aggregate per-plan counts into fixtures ---
     logger.info("[QA] Aggregating per-plan counts...")
@@ -128,6 +130,11 @@ def run(
 
     json_path = out_path.with_suffix(".json")
     write_json(result, json_path)
+
+    # Write positions file for click-to-highlight
+    positions_path = Path(str(out_path) + "_positions.json")
+    if all_plan_positions or all_keynote_positions:
+        write_positions_json(all_plan_positions, all_keynote_positions, positions_path)
 
     # Print full QA report and summary
     print(f"\n{qa_text}")

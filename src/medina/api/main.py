@@ -12,6 +12,7 @@ from medina.api.routes import (
     demo,
     export,
     pages,
+    positions,
     processing,
     results,
     sources,
@@ -52,6 +53,7 @@ app.include_router(results.router)
 app.include_router(pages.router)
 app.include_router(export.router)
 app.include_router(corrections.router)
+app.include_router(positions.router)
 app.include_router(demo.router)
 app.include_router(dashboard.router)
 

@@ -1,9 +1,10 @@
-import { useState, useRef, useCallback, useMemo } from 'react';
+import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 import { useProjectStore } from '../../store/projectStore';
 import { getPagePdfUrl, getPageImageUrl } from '../../api/client';
+import FixtureOverlay from './FixtureOverlay';
 
 // Configure pdf.js worker from CDN
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
@@ -13,13 +14,26 @@ const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.25;
 
 export default function PdfViewer() {
-  const { projectData, projectId, currentPage, totalPages, setCurrentPage, appState } = useProjectStore();
+  const { projectData, projectId, currentPage, totalPages, setCurrentPage, appState, highlight, clearHighlight } = useProjectStore();
   const [zoom, setZoom] = useState(1);
   const [pdfError, setPdfError] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
+  const [renderedWidth, setRenderedWidth] = useState(0);
+  const [renderedHeight, setRenderedHeight] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStart = useRef<{ x: number; y: number; scrollLeft: number; scrollTop: number } | null>(null);
   const sheetIndex = projectData?.sheet_index ?? [];
   const pages = projectData?.pages ?? [];
+
+  // Escape key dismisses highlights
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') clearHighlight();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [clearHighlight]);
 
   const currentSheet = sheetIndex[currentPage - 1];
   const currentPageEntry = pages[currentPage - 1];
@@ -40,17 +54,19 @@ export default function PdfViewer() {
     if (currentPage > 1) {
       setZoom(1);
       setPdfError(false);
+      clearHighlight();
       setCurrentPage(currentPage - 1);
     }
-  }, [currentPage, setCurrentPage]);
+  }, [currentPage, setCurrentPage, clearHighlight]);
 
   const goToNext = useCallback(() => {
     if (currentPage < totalPages) {
       setZoom(1);
       setPdfError(false);
+      clearHighlight();
       setCurrentPage(currentPage + 1);
     }
-  }, [currentPage, totalPages, setCurrentPage]);
+  }, [currentPage, totalPages, setCurrentPage, clearHighlight]);
 
   const handleWheel = useCallback((e: React.WheelEvent) => {
     if (e.ctrlKey || e.metaKey) {
@@ -60,6 +76,33 @@ export default function PdfViewer() {
         return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z + delta));
       });
     }
+  }, []);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    const el = containerRef.current;
+    if (!el) return;
+    // Only enable drag-pan when content overflows (zoomed in)
+    if (el.scrollWidth <= el.clientWidth && el.scrollHeight <= el.clientHeight) return;
+    setIsDragging(true);
+    dragStart.current = {
+      x: e.clientX,
+      y: e.clientY,
+      scrollLeft: el.scrollLeft,
+      scrollTop: el.scrollTop,
+    };
+  }, []);
+
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    if (!isDragging || !dragStart.current || !containerRef.current) return;
+    const dx = e.clientX - dragStart.current.x;
+    const dy = e.clientY - dragStart.current.y;
+    containerRef.current.scrollLeft = dragStart.current.scrollLeft - dx;
+    containerRef.current.scrollTop = dragStart.current.scrollTop - dy;
+  }, [isDragging]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsDragging(false);
+    dragStart.current = null;
   }, []);
 
   // Measure container width so react-pdf can fit the page
@@ -78,6 +121,12 @@ export default function PdfViewer() {
 
   const onDocumentLoadSuccess = useCallback(() => {
     setPdfError(false);
+  }, []);
+
+  const onPageRenderSuccess = useCallback((page: any) => {
+    // page.width and page.height reflect the rendered CSS pixel dimensions
+    if (page?.width) setRenderedWidth(page.width);
+    if (page?.height) setRenderedHeight(page.height);
   }, []);
 
   const onDocumentLoadError = useCallback(() => {
@@ -166,7 +215,14 @@ export default function PdfViewer() {
         ref={measuredRef}
         className="flex-1 overflow-auto p-4"
         onWheel={handleWheel}
-        style={{ cursor: zoom > 1 ? 'grab' : 'default' }}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        style={{
+          cursor: isDragging ? 'grabbing' : zoom > 1 ? 'grab' : 'default',
+          userSelect: isDragging ? 'none' : 'auto',
+        }}
       >
         <div
           className="flex items-center justify-center"
@@ -185,15 +241,24 @@ export default function PdfViewer() {
                 </div>
               }
             >
-              <Page
-                pageNumber={1}
-                width={pageWidth}
-                renderTextLayer={false}
-                renderAnnotationLayer={false}
-                loading={
-                  <div className="text-slate-500 text-sm">Rendering page...</div>
-                }
-              />
+              <div className="relative">
+                <Page
+                  pageNumber={1}
+                  width={pageWidth}
+                  renderTextLayer={false}
+                  renderAnnotationLayer={false}
+                  onRenderSuccess={onPageRenderSuccess}
+                  loading={
+                    <div className="text-slate-500 text-sm">Rendering page...</div>
+                  }
+                />
+                {(highlight.fixtureCode || highlight.keynoteNumber) && (
+                  <FixtureOverlay
+                    renderedWidth={renderedWidth}
+                    renderedHeight={renderedHeight}
+                  />
+                )}
+              </div>
             </Document>
           ) : hasProject && pdfError ? (
             /* Fallback: image rendering with DPI scaled to zoom level */

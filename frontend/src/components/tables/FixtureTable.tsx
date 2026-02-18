@@ -6,8 +6,10 @@ const SPEC_COLUMNS = [
 ] as const;
 
 export default function FixtureTable() {
-  const { projectData, updateFixtureCount, addCorrection } = useProjectStore();
+  const { projectData, updateFixtureCount, addCorrection, highlightFixture, projectId } = useProjectStore();
   if (!projectData) return null;
+
+  const canHighlight = !!projectId;
 
   const plans = projectData.lighting_plans;
 
@@ -42,7 +44,13 @@ export default function FixtureTable() {
         <tbody>
           {projectData.fixtures.map((fixture) => (
             <tr key={fixture.code} className="hover:bg-slate-100 group">
-              <td className="px-3.5 py-2 text-left font-bold text-primary bg-slate-50 sticky left-0 z-[5] border-b border-r border-border group-hover:bg-blue-50 whitespace-nowrap">
+              <td
+                className={`px-3.5 py-2 text-left font-bold text-primary bg-slate-50 sticky left-0 z-[5] border-b border-r border-border group-hover:bg-blue-50 whitespace-nowrap ${
+                  canHighlight ? 'cursor-pointer hover:text-accent hover:underline' : ''
+                }`}
+                onClick={canHighlight ? () => highlightFixture(fixture.code) : undefined}
+                title={canHighlight ? `Click to locate ${fixture.code} on plan` : undefined}
+              >
                 {fixture.code}
               </td>
               {SPEC_COLUMNS.map((col) => {
@@ -64,6 +72,7 @@ export default function FixtureTable() {
                     key={plan}
                     value={count}
                     onChange={(newVal) => handleCountChange(fixture.code, plan, count, newVal)}
+                    onLocate={canHighlight && count > 0 ? () => highlightFixture(fixture.code, plan) : undefined}
                   />
                 );
               })}

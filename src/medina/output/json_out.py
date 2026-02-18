@@ -112,3 +112,46 @@ def write_json(
 
     logger.info("JSON output saved to %s", output_path)
     return output_path
+
+
+def write_positions_json(
+    fixture_positions: dict,
+    keynote_positions: dict,
+    output_path: str | Path,
+) -> Path:
+    """Write fixture and keynote positions to a separate JSON file.
+
+    This keeps the main results JSON lightweight while storing the
+    per-fixture, per-keynote coordinate data needed for click-to-highlight.
+
+    Args:
+        fixture_positions: ``{sheet_code: {"page_width": float,
+            "page_height": float, "fixtures": {code: [pos, ...]}}}``.
+        keynote_positions: ``{sheet_code: {"page_width": float,
+            "page_height": float, "keynotes": {number: [pos, ...]}}}``.
+        output_path: Path to write (should end with ``_positions.json``).
+
+    Returns:
+        The output path.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Merge fixture and keynote positions per plan page
+    all_plans: set[str] = set(fixture_positions) | set(keynote_positions)
+    merged: dict[str, dict] = {}
+    for plan in sorted(all_plans):
+        fp = fixture_positions.get(plan, {})
+        kp = keynote_positions.get(plan, {})
+        merged[plan] = {
+            "page_width": fp.get("page_width") or kp.get("page_width", 0),
+            "page_height": fp.get("page_height") or kp.get("page_height", 0),
+            "fixture_positions": fp.get("fixtures", {}),
+            "keynote_positions": kp.get("keynotes", {}),
+        }
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=2, ensure_ascii=False)
+
+    logger.info("Positions JSON saved to %s", output_path)
+    return output_path

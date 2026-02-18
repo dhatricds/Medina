@@ -9,10 +9,10 @@ interface Props {
 export default function ThreePanel({ left, center, right }: Props) {
   return (
     <div className="flex-1 flex overflow-hidden">
-      <div className="w-[35%] min-w-[300px] bg-pdf-bg flex flex-col border-r border-border">
+      <div className="w-[45%] min-w-[360px] bg-pdf-bg flex flex-col border-r border-border">
         {left}
       </div>
-      <div className="w-[240px] min-w-[220px] bg-card border-r border-border overflow-y-auto p-4">
+      <div className="w-[200px] min-w-[180px] bg-card border-r border-border overflow-y-auto p-3">
         {center}
       </div>
       <div className="flex-1 flex flex-col overflow-hidden">

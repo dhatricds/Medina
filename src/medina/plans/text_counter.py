@@ -446,7 +446,8 @@ def count_fixtures_on_plan(
     pdf_page: Any,
     fixture_codes: list[str],
     plan_sheet_codes: list[str] | None = None,
-) -> dict[str, int]:
+    return_positions: bool = False,
+) -> dict[str, int] | dict[str, dict]:
     """Count occurrences of each fixture code on a single lighting plan page.
 
     Uses **character-level** detection from ``page.chars`` with modal
@@ -462,9 +463,12 @@ def count_fixtures_on_plan(
         plan_sheet_codes: Optional list of known plan sheet codes. Fixture
             codes that match a sheet code get extra filtering to avoid
             counting cross-reference labels (e.g., "SEE E1A").
+        return_positions: If True, return enriched dict with positions.
 
     Returns:
-        Dict mapping fixture_code to count on this specific page.
+        If ``return_positions`` is False: ``{fixture_code: count}``.
+        If True: ``{fixture_code: {"count": int, "positions": [...]}}``
+        where each position has ``x0, top, x1, bottom, cx, cy``.
 
     Raises:
         FixtureCountError: If text extraction fails critically.
@@ -474,7 +478,7 @@ def count_fixtures_on_plan(
 
     if not fixture_codes:
         logger.warning("No fixture codes provided for plan %s", sheet)
-        return {}
+        return {} if not return_positions else {}
 
     try:
         chars = pdf_page.chars
@@ -485,6 +489,8 @@ def count_fixtures_on_plan(
 
     if not chars:
         logger.warning("No characters found on plan %s", sheet)
+        if return_positions:
+            return {code: {"count": 0, "positions": []} for code in fixture_codes}
         return {code: 0 for code in fixture_codes}
 
     page_width = pdf_page.width
@@ -552,6 +558,26 @@ def count_fixtures_on_plan(
         "Plan %s: found %d total fixture instances across %d types",
         sheet, total, sum(1 for c in counts.values() if c > 0),
     )
+
+    if return_positions:
+        result: dict[str, dict] = {}
+        for code in fixture_codes:
+            result[code] = {
+                "count": counts[code],
+                "positions": [
+                    {
+                        "x0": m["x0"],
+                        "top": m["top"],
+                        "x1": m["x1"],
+                        "bottom": m["bottom"],
+                        "cx": m["cx"],
+                        "cy": m["cy"],
+                    }
+                    for m in all_matches[code]
+                ],
+            }
+        return result
+
     return counts
 
 
@@ -560,7 +586,8 @@ def count_all_plans(
     pdf_pages: dict[int, Any],
     fixture_codes: list[str],
     plan_sheet_codes: list[str] | None = None,
-) -> dict[str, dict[str, int]]:
+    return_positions: bool = False,
+) -> dict[str, dict[str, int]] | tuple[dict[str, dict[str, int]], dict]:
     """Count fixtures on all lighting plan pages.
 
     Args:
@@ -569,11 +596,18 @@ def count_all_plans(
         fixture_codes: Fixture type codes to search for.
         plan_sheet_codes: Optional list of known plan sheet codes for
             cross-reference filtering.
+        return_positions: If True, also return position data.
 
     Returns:
-        ``{sheet_code: {fixture_code: count}}`` for every plan page.
+        If ``return_positions`` is False:
+            ``{sheet_code: {fixture_code: count}}``.
+        If True:
+            Tuple of ``(counts_dict, positions_dict)`` where
+            ``positions_dict = {sheet_code: {"page_width": float,
+            "page_height": float, "fixtures": {code: [pos, ...]}}}``.
     """
     results: dict[str, dict[str, int]] = {}
+    all_positions: dict[str, dict] = {}
 
     for page_info in plan_pages:
         sheet = page_info.sheet_code or f"page_{page_info.page_number}"
@@ -584,17 +618,42 @@ def count_all_plans(
                 sheet, page_info.page_number,
             )
             results[sheet] = {code: 0 for code in fixture_codes}
+            if return_positions:
+                all_positions[sheet] = {
+                    "page_width": 0, "page_height": 0, "fixtures": {},
+                }
             continue
 
         try:
-            counts = count_fixtures_on_plan(
+            raw = count_fixtures_on_plan(
                 page_info, pdf_page, fixture_codes,
                 plan_sheet_codes=plan_sheet_codes,
+                return_positions=return_positions,
             )
         except FixtureCountError:
             logger.exception("Error counting fixtures on plan %s", sheet)
-            counts = {code: 0 for code in fixture_codes}
+            raw = {code: 0 for code in fixture_codes}
 
-        results[sheet] = counts
+        if return_positions and isinstance(raw, dict) and raw:
+            first_val = next(iter(raw.values()), None)
+            if isinstance(first_val, dict):
+                # Enriched format: {code: {"count": int, "positions": [...]}}
+                results[sheet] = {
+                    code: raw[code]["count"] for code in fixture_codes
+                }
+                all_positions[sheet] = {
+                    "page_width": pdf_page.width,
+                    "page_height": pdf_page.height,
+                    "fixtures": {
+                        code: raw[code]["positions"]
+                        for code in fixture_codes
+                    },
+                }
+            else:
+                results[sheet] = raw  # type: ignore[assignment]
+        else:
+            results[sheet] = raw  # type: ignore[assignment]
 
+    if return_positions:
+        return results, all_positions
     return results

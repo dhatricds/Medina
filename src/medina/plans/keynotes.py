@@ -234,7 +234,8 @@ def _count_keynote_occurrences(
     keynote_numbers: list[str],
     page_width: float,
     page_height: float,
-) -> dict[str, int]:
+    return_positions: bool = False,
+) -> dict[str, int] | tuple[dict[str, int], dict[str, list[dict]]]:
     """Count keynote symbols on the plan using geometric shape detection.
 
     Keynote numbers on plans appear inside geometric shapes (diamonds,
@@ -250,8 +251,9 @@ def _count_keynote_occurrences(
     from collections import Counter
 
     counts: dict[str, int] = {n: 0 for n in keynote_numbers}
+    positions: dict[str, list[dict]] = {n: [] for n in keynote_numbers}
     if not keynote_numbers:
-        return counts
+        return (counts, positions) if return_positions else counts
 
     try:
         words = pdf_page.extract_words(
@@ -261,14 +263,16 @@ def _count_keynote_occurrences(
         )
     except Exception:
         logger.warning("Failed to extract words for keynote counting")
-        return counts
+        return (counts, positions) if return_positions else counts
 
     lines = pdf_page.lines or []
     if not lines:
         logger.debug("No lines on page — falling back to text-only counting")
-        return _count_keynote_text_only(
-            words, keynote_numbers, page_width, page_height
+        result = _count_keynote_text_only(
+            words, keynote_numbers, page_width, page_height,
+            return_positions=return_positions,
         )
+        return result
 
     # Filter for candidate keynote numbers in the drawing area.
     drawing_max_x = page_width * 0.70
@@ -291,10 +295,16 @@ def _count_keynote_occurrences(
             "text": text,
             "quadrants": q_count,
             "font_h": font_h,
+            "x0": w["x0"],
+            "top": w["top"],
+            "x1": w["x1"],
+            "bottom": w["bottom"],
+            "cx": cx,
+            "cy": cy,
         })
 
     if not candidates:
-        return counts
+        return (counts, positions) if return_positions else counts
 
     # Step 1: Find modal font_h from high-confidence candidates.
     high_conf = [c for c in candidates if c["quadrants"] >= 4]
@@ -312,16 +322,27 @@ def _count_keynote_occurrences(
                 "No geometric keynote shapes detected — "
                 "falling back to text-only counting"
             )
-            return _count_keynote_text_only(
-                words, keynote_numbers, page_width, page_height
+            result = _count_keynote_text_only(
+                words, keynote_numbers, page_width, page_height,
+                return_positions=return_positions,
             )
+            return result
 
     # Step 2: Count candidates with >= 3 quadrants AND matching font_h.
     for c in candidates:
         if c["quadrants"] >= 3 and c["font_h"] == modal_font_h:
             counts[c["text"]] += 1
+            if return_positions:
+                positions[c["text"]].append({
+                    "x0": c["x0"],
+                    "top": c["top"],
+                    "x1": c["x1"],
+                    "bottom": c["bottom"],
+                    "cx": c["cx"],
+                    "cy": c["cy"],
+                })
 
-    return counts
+    return (counts, positions) if return_positions else counts
 
 
 def _count_keynote_text_only(
@@ -329,12 +350,14 @@ def _count_keynote_text_only(
     keynote_numbers: list[str],
     page_width: float,
     page_height: float,
-) -> dict[str, int]:
+    return_positions: bool = False,
+) -> dict[str, int] | tuple[dict[str, int], dict[str, list[dict]]]:
     """Fallback: count keynote numbers by text matching only.
 
     Used when no geometric line data is available on the page.
     """
     counts: dict[str, int] = {n: 0 for n in keynote_numbers}
+    positions: dict[str, list[dict]] = {n: [] for n in keynote_numbers}
     kn_set = set(keynote_numbers)
     drawing_max_x = page_width * 0.70
     title_min_y = page_height * 0.90
@@ -347,8 +370,17 @@ def _count_keynote_text_only(
         text = w["text"].strip()
         if text in kn_set:
             counts[text] += 1
+            if return_positions:
+                positions[text].append({
+                    "x0": w["x0"],
+                    "top": w["top"],
+                    "x1": w["x1"],
+                    "bottom": w["bottom"],
+                    "cx": cx,
+                    "cy": cy,
+                })
 
-    return counts
+    return (counts, positions) if return_positions else counts
 
 
 def _find_keynotes_header_x(words: list[Any]) -> float | None:
@@ -468,7 +500,8 @@ def extract_keynotes_from_plan(
     page_info: PageInfo,
     pdf_page: Any,
     known_fixture_codes: list[str] | None = None,
-) -> tuple[list[KeyNote], dict[str, int]]:
+    return_positions: bool = False,
+) -> tuple[list[KeyNote], dict[str, int]] | tuple[list[KeyNote], dict[str, int], dict[str, list[dict]]]:
     """Extract keynotes and count their occurrences on a single plan page.
 
     Uses spatial extraction to isolate the keynotes legend area (right
@@ -479,10 +512,14 @@ def extract_keynotes_from_plan(
         pdf_page: pdfplumber page object.
         known_fixture_codes: Optional list of known fixture codes for
             matching references in keynote text.
+        return_positions: If True, also return keynote positions.
 
     Returns:
-        Tuple of ``(keynotes_list, counts_dict)`` where ``counts_dict``
-        maps ``keynote_number -> count_on_this_page``.
+        If ``return_positions`` is False:
+            Tuple of ``(keynotes_list, counts_dict)``.
+        If True:
+            Tuple of ``(keynotes_list, counts_dict, positions_dict)``
+            where ``positions_dict = {keynote_number: [pos, ...]}``.
 
     Raises:
         KeyNoteExtractionError: If extraction fails critically.
@@ -499,12 +536,13 @@ def extract_keynotes_from_plan(
 
     keynotes: list[KeyNote] = []
     counts: dict[str, int] = {}
+    kn_positions: dict[str, list[dict]] = {}
 
     # Find the keynotes section.
     section_text = _find_keynotes_section(region_text)
     if section_text is None:
         logger.debug("No keynotes section found on plan %s", sheet)
-        return keynotes, counts
+        return (keynotes, counts, kn_positions) if return_positions else (keynotes, counts)
 
     # Parse numbered entries.
     entries = _parse_keynote_entries(section_text)
@@ -512,7 +550,7 @@ def extract_keynotes_from_plan(
         logger.debug(
             "Keynotes header found but no numbered entries on plan %s", sheet
         )
-        return keynotes, counts
+        return (keynotes, counts, kn_positions) if return_positions else (keynotes, counts)
 
     # Deduplicate entries by keynote number — keep the first (longest) text
     # for each number.  Duplicate numbers often arise when the region crop
@@ -540,9 +578,14 @@ def extract_keynotes_from_plan(
     # Count occurrences of keynote numbers on the drawing.
     page_width = pdf_page.width
     page_height = pdf_page.height
-    counts = _count_keynote_occurrences(
-        pdf_page, keynote_numbers, page_width, page_height
+    count_result = _count_keynote_occurrences(
+        pdf_page, keynote_numbers, page_width, page_height,
+        return_positions=return_positions,
     )
+    if return_positions and isinstance(count_result, tuple):
+        counts, kn_positions = count_result
+    else:
+        counts = count_result  # type: ignore[assignment]
 
     # Build KeyNote objects.
     for num, text in entries:
@@ -562,6 +605,8 @@ def extract_keynotes_from_plan(
                 sheet, num, counts[num],
             )
 
+    if return_positions:
+        return keynotes, counts, kn_positions
     return keynotes, counts
 
 
@@ -569,7 +614,8 @@ def extract_all_keynotes(
     plan_pages: list[PageInfo],
     pdf_pages: dict[int, Any],
     known_fixture_codes: list[str] | None = None,
-) -> tuple[list[KeyNote], dict[str, dict[str, int]]]:
+    return_positions: bool = False,
+) -> tuple[list[KeyNote], dict[str, dict[str, int]]] | tuple[list[KeyNote], dict[str, dict[str, int]], dict]:
     """Extract keynotes from all plan pages.
 
     Each page's keynotes are kept as separate entries — keynotes with
@@ -580,13 +626,19 @@ def extract_all_keynotes(
         plan_pages: List of page metadata for lighting plan pages.
         pdf_pages: Mapping of page_number to pdfplumber page object.
         known_fixture_codes: Optional list of known fixture codes.
+        return_positions: If True, also return keynote positions.
 
     Returns:
-        Tuple of ``(all_keynotes, all_counts)`` where
-        ``all_counts = {sheet_code: {keynote_number: count}}``.
+        If ``return_positions`` is False:
+            Tuple of ``(all_keynotes, all_counts)``.
+        If True:
+            Tuple of ``(all_keynotes, all_counts, all_positions)``
+            where ``all_positions = {sheet_code: {"page_width": float,
+            "page_height": float, "keynotes": {number: [pos, ...]}}}``.
     """
     all_keynotes: list[KeyNote] = []
     all_counts: dict[str, dict[str, int]] = {}
+    all_positions: dict[str, dict] = {}
 
     for page_info in plan_pages:
         sheet = page_info.sheet_code or f"page_{page_info.page_number}"
@@ -597,16 +649,31 @@ def extract_all_keynotes(
                 sheet, page_info.page_number,
             )
             all_counts[sheet] = {}
+            if return_positions:
+                all_positions[sheet] = {
+                    "page_width": 0, "page_height": 0, "keynotes": {},
+                }
             continue
 
         try:
-            page_keynotes, page_counts = extract_keynotes_from_plan(
-                page_info, pdf_page, known_fixture_codes
+            raw = extract_keynotes_from_plan(
+                page_info, pdf_page, known_fixture_codes,
+                return_positions=return_positions,
             )
         except KeyNoteExtractionError:
             logger.exception("Error extracting keynotes from plan %s", sheet)
             all_counts[sheet] = {}
             continue
+
+        if return_positions and len(raw) == 3:
+            page_keynotes, page_counts, page_positions = raw
+            all_positions[sheet] = {
+                "page_width": pdf_page.width,
+                "page_height": pdf_page.height,
+                "keynotes": page_positions,
+            }
+        else:
+            page_keynotes, page_counts = raw[0], raw[1]
 
         all_counts[sheet] = page_counts
         all_keynotes.extend(page_keynotes)
@@ -630,4 +697,6 @@ def extract_all_keynotes(
         "Extracted %d keynotes across %d plan pages",
         len(all_keynotes), len(plan_pages),
     )
+    if return_positions:
+        return all_keynotes, all_counts, all_positions
     return all_keynotes, all_counts

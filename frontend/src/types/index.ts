@@ -96,4 +96,25 @@ export interface DashboardProject {
   qa_passed: boolean | null;
 }
 
+export interface FixturePosition {
+  x0: number;
+  top: number;
+  x1: number;
+  bottom: number;
+  cx: number;
+  cy: number;
+}
+
+export interface HighlightState {
+  fixtureCode: string | null;
+  keynoteNumber: string | null;
+  targetSheetCode: string | null;
+  positions: FixturePosition[];
+  pageWidth: number;
+  pageHeight: number;
+  loading: boolean;
+  /** Indices of positions the user flagged as incorrectly counted. */
+  rejectedIndices: Set<number>;
+}
+
 export type ViewMode = 'workspace' | 'dashboard' | 'dashboard_detail';

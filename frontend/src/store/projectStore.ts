@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ProjectData, AgentInfo, AppState, Correction, DashboardProject, ViewMode } from '../types';
+import type { ProjectData, AgentInfo, AppState, Correction, DashboardProject, ViewMode, HighlightState, FixturePosition } from '../types';
 import {
   loadDemoData,
   uploadFile,
@@ -14,8 +14,20 @@ import {
   getDashboardProject,
   deleteDashboardProject,
   getDashboardExcelUrl,
+  getPagePositions,
 } from '../api/client';
 import type { SourceItem } from '../api/client';
+
+const emptyHighlight: HighlightState = {
+  fixtureCode: null,
+  keynoteNumber: null,
+  targetSheetCode: null,
+  positions: [],
+  pageWidth: 0,
+  pageHeight: 0,
+  loading: false,
+  rejectedIndices: new Set(),
+};
 
 /** Derive page count: prefer total_pages from backend, fall back to sheet_index length. */
 function getPageCount(data: ProjectData): number {
@@ -95,6 +107,9 @@ interface ProjectStore {
   sseActive: boolean;
   error: string | null;
 
+  // Highlight state
+  highlight: HighlightState;
+
   // Dashboard state
   dashboardProjects: DashboardProject[];
   dashboardDetail: ProjectData | null;
@@ -111,6 +126,12 @@ interface ProjectStore {
   closeDashboardDetail: () => void;
   removeDashboardProject: (id: string) => Promise<void>;
   downloadDashboardExcel: (id: string) => void;
+
+  // Highlight actions
+  highlightFixture: (code: string, targetPlan?: string) => Promise<void>;
+  highlightKeynote: (number: string, targetPlan?: string) => Promise<void>;
+  clearHighlight: () => void;
+  toggleMarker: (index: number) => void;
 
   // Workspace actions
   setAppState: (state: AppState) => void;
@@ -153,6 +174,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   sources: [],
   sseActive: false,
   error: null,
+
+  // Highlight state
+  highlight: { ...emptyHighlight },
 
   // Dashboard state
   dashboardProjects: [],
@@ -221,6 +245,199 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   downloadDashboardExcel: (id: string) => {
     window.open(getDashboardExcelUrl(id), '_blank');
+  },
+
+  // Highlight actions
+  highlightFixture: async (code: string, targetPlan?: string) => {
+    const { projectId, projectData } = get();
+    if (!projectId || !projectData) return;
+
+    // Find the target plan: explicit or first plan with count > 0
+    const fixture = projectData.fixtures.find((f) => f.code === code);
+    let planCode = targetPlan;
+    if (!planCode && fixture) {
+      planCode = projectData.lighting_plans.find(
+        (p) => (fixture.counts_per_plan[p] ?? 0) > 0
+      );
+    }
+    if (!planCode) planCode = projectData.lighting_plans[0];
+    if (!planCode) return;
+
+    // Find page number for this plan
+    const pageEntry = projectData.pages?.find((p) => p.sheet_code === planCode);
+    if (!pageEntry) return;
+
+    // Navigate to that page
+    set({
+      currentPage: pageEntry.page_number,
+      highlight: {
+        fixtureCode: code,
+        keynoteNumber: null,
+        targetSheetCode: planCode,
+        positions: [],
+        pageWidth: 0,
+        pageHeight: 0,
+        loading: true,
+        rejectedIndices: new Set(),
+      },
+    });
+
+    // Fetch positions
+    try {
+      const resp = await getPagePositions(projectId, pageEntry.page_number);
+      if (resp.fixture_positions && resp.fixture_positions[code]) {
+        set({
+          highlight: {
+            fixtureCode: code,
+            keynoteNumber: null,
+            targetSheetCode: planCode!,
+            positions: resp.fixture_positions[code],
+            pageWidth: resp.page_width ?? 0,
+            pageHeight: resp.page_height ?? 0,
+            loading: false,
+            rejectedIndices: new Set(),
+          },
+        });
+      } else {
+        set({
+          highlight: {
+            fixtureCode: code,
+            keynoteNumber: null,
+            targetSheetCode: planCode!,
+            positions: [],
+            pageWidth: 0,
+            pageHeight: 0,
+            loading: false,
+            rejectedIndices: new Set(),
+          },
+        });
+      }
+    } catch {
+      set((s) => ({
+        highlight: { ...s.highlight, loading: false },
+      }));
+    }
+  },
+
+  highlightKeynote: async (number: string, targetPlan?: string) => {
+    const { projectId, projectData } = get();
+    if (!projectId || !projectData) return;
+
+    let planCode = targetPlan;
+    if (!planCode) {
+      const kn = projectData.keynotes.find((k) => k.keynote_number === number);
+      if (kn) {
+        planCode = projectData.lighting_plans.find(
+          (p) => (kn.counts_per_plan[p] ?? 0) > 0
+        );
+      }
+    }
+    if (!planCode) planCode = projectData.lighting_plans[0];
+    if (!planCode) return;
+
+    const pageEntry = projectData.pages?.find((p) => p.sheet_code === planCode);
+    if (!pageEntry) return;
+
+    set({
+      currentPage: pageEntry.page_number,
+      highlight: {
+        fixtureCode: null,
+        keynoteNumber: number,
+        targetSheetCode: planCode,
+        positions: [],
+        pageWidth: 0,
+        pageHeight: 0,
+        loading: true,
+        rejectedIndices: new Set(),
+      },
+    });
+
+    try {
+      const resp = await getPagePositions(projectId, pageEntry.page_number);
+      if (resp.keynote_positions && resp.keynote_positions[number]) {
+        set({
+          highlight: {
+            fixtureCode: null,
+            keynoteNumber: number,
+            targetSheetCode: planCode!,
+            positions: resp.keynote_positions[number],
+            pageWidth: resp.page_width ?? 0,
+            pageHeight: resp.page_height ?? 0,
+            loading: false,
+            rejectedIndices: new Set(),
+          },
+        });
+      } else {
+        set({
+          highlight: {
+            fixtureCode: null,
+            keynoteNumber: number,
+            targetSheetCode: planCode!,
+            positions: [],
+            pageWidth: 0,
+            pageHeight: 0,
+            loading: false,
+            rejectedIndices: new Set(),
+          },
+        });
+      }
+    } catch {
+      set((s) => ({
+        highlight: { ...s.highlight, loading: false },
+      }));
+    }
+  },
+
+  clearHighlight: () => set({ highlight: { ...emptyHighlight } }),
+
+  toggleMarker: (index: number) => {
+    const { highlight, updateFixtureCount, updateKeynoteCount, addCorrection, projectData } = get();
+    if (!highlight.positions.length) return;
+
+    const next = new Set(highlight.rejectedIndices);
+    if (next.has(index)) {
+      next.delete(index);
+    } else {
+      next.add(index);
+    }
+
+    const acceptedCount = highlight.positions.length - next.size;
+    set({ highlight: { ...highlight, rejectedIndices: next } });
+
+    // Auto-update the table count
+    const plan = highlight.targetSheetCode;
+    if (!plan || !projectData) return;
+
+    if (highlight.fixtureCode) {
+      const fixture = projectData.fixtures.find((f) => f.code === highlight.fixtureCode);
+      const original = fixture?.counts_per_plan[plan] ?? 0;
+      updateFixtureCount(highlight.fixtureCode, plan, acceptedCount);
+      if (acceptedCount !== original) {
+        addCorrection({
+          type: 'lighting',
+          identifier: highlight.fixtureCode,
+          sheet: plan,
+          original,
+          corrected: acceptedCount,
+        });
+      }
+    } else if (highlight.keynoteNumber) {
+      const kn = projectData.keynotes.find((k) => k.keynote_number === highlight.keynoteNumber);
+      const original = kn?.counts_per_plan[plan] ?? 0;
+      updateKeynoteCount(highlight.keynoteNumber, plan, acceptedCount);
+      if (acceptedCount !== original) {
+        addCorrection({
+          type: 'keynote',
+          identifier: highlight.keynoteNumber,
+          sheet: plan,
+          original,
+          corrected: acceptedCount,
+        });
+      }
+    }
+
+    // Recalculate totals after count change
+    get().recalcTotals();
   },
 
   // Workspace actions
@@ -437,5 +654,6 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     totalPages: 0,
     sseActive: false,
     error: null,
+    highlight: { ...emptyHighlight },
   }),
 }));

@@ -297,12 +297,20 @@ def run_pipeline(
     all_keynote_counts: dict[str, dict[str, int]] = {}
     all_keynotes: list[KeyNote] = []
 
+    all_plan_positions: dict = {}
+    all_keynote_positions: dict = {}
+
     if plan_pages_info and fixture_codes:
         # Always run text-based counting
         from medina.plans.text_counter import count_all_plans
-        all_plan_counts = count_all_plans(
-            plan_pages_info, pdf_pages, fixture_codes
+        counts_result = count_all_plans(
+            plan_pages_info, pdf_pages, fixture_codes,
+            return_positions=True,
         )
+        if isinstance(counts_result, tuple):
+            all_plan_counts, all_plan_positions = counts_result
+        else:
+            all_plan_counts = counts_result
 
         # Vision-based counting — triggers when:
         #   1. User explicitly requested --use-vision, OR
@@ -384,9 +392,13 @@ def run_pipeline(
     if plan_pages_info:
         report("COUNT", "Extracting keynotes...")
         from medina.plans.keynotes import extract_all_keynotes
-        all_keynotes, all_keynote_counts = extract_all_keynotes(
-            plan_pages_info, pdf_pages
+        kn_result = extract_all_keynotes(
+            plan_pages_info, pdf_pages, return_positions=True,
         )
+        if len(kn_result) == 3:
+            all_keynotes, all_keynote_counts, all_keynote_positions = kn_result
+        else:
+            all_keynotes, all_keynote_counts = kn_result[0], kn_result[1]
 
         # The text-based keynote counter uses geometric shape
         # detection (finds numbers inside diamond/hexagon shapes).
@@ -501,6 +513,10 @@ def run_pipeline(
     logger.info("\n%s", qa_text)
     report("QA", f"Confidence: {qa_report.overall_confidence:.1%}")
 
+    # Attach position data for click-to-highlight (transient, not serialized)
+    result._fixture_positions = all_plan_positions  # type: ignore[attr-defined]
+    result._keynote_positions = all_keynote_positions  # type: ignore[attr-defined]
+
     # --- Stage 7: OUTPUT is handled by the caller ---
     report("DONE", "Pipeline complete")
     return result
@@ -530,5 +546,13 @@ def run_and_save(
         json_path = output_path.with_suffix(".json")
         from medina.output.json_out import write_json
         write_json(result, json_path)
+
+    # Write positions file for click-to-highlight
+    fixture_pos = getattr(result, "_fixture_positions", {})
+    keynote_pos = getattr(result, "_keynote_positions", {})
+    if fixture_pos or keynote_pos:
+        from medina.output.json_out import write_positions_json
+        positions_path = Path(str(output_path) + "_positions.json")
+        write_positions_json(fixture_pos, keynote_pos, positions_path)
 
     return result
