@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from medina.api.routes import (
     corrections,
+    dashboard,
     demo,
     export,
     pages,
@@ -16,6 +17,7 @@ from medina.api.routes import (
     sources,
     upload,
 )
+from medina.api.seed import seed_dashboard
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +53,12 @@ app.include_router(pages.router)
 app.include_router(export.router)
 app.include_router(corrections.router)
 app.include_router(demo.router)
+app.include_router(dashboard.router)
+
+
+@app.on_event("startup")
+async def startup_event():
+    seed_dashboard()
 
 
 @app.get("/")

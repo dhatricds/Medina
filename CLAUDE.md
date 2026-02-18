@@ -310,7 +310,7 @@ Medina/
 │   ├── index.html
 │   ├── public/demo/             # Static demo JSON (hcmc.json, anoka.json)
 │   └── src/
-│       ├── App.tsx              # Root — useAgentProgress, panel layout
+│       ├── App.tsx              # Root — view routing (dashboard/workspace), useAgentProgress
 │       ├── main.tsx
 │       ├── index.css            # Tailwind directives
 │       ├── types/index.ts       # TS interfaces matching pipeline JSON
@@ -325,7 +325,8 @@ Medina/
 │           ├── agents/          # AgentPipeline, AgentCard
 │           ├── tables/          # TabContainer, FixtureTable, KeynoteTable, EditableCell
 │           ├── qa/              # WarningModal
-│           └── upload/          # SourcePicker
+│           ├── upload/          # SourcePicker
+│           └── dashboard/       # DashboardView (card grid), DashboardDetail (project detail)
 ├── src/
 │   └── medina/
 │       ├── __init__.py
@@ -363,9 +364,10 @@ Medina/
 │       │   └── json_out.py      # JSON output generation
 │       ├── api/                 # FastAPI web backend
 │       │   ├── __init__.py
-│       │   ├── main.py          # FastAPI app, CORS, router registration
+│       │   ├── main.py          # FastAPI app, CORS, router registration, startup seed
 │       │   ├── models.py        # Request/response Pydantic schemas
 │       │   ├── projects.py      # In-memory ProjectState store
+│       │   ├── seed.py          # Parse training xlsx → seed dashboard on startup
 │       │   ├── orchestrator_wrapper.py  # Wraps agent runs with SSE events
 │       │   └── routes/
 │       │       ├── sources.py   # GET /api/sources (list data/ folder)
@@ -375,7 +377,8 @@ Medina/
 │       │       ├── pages.py     # GET /api/projects/{id}/page/{n} (PNG)
 │       │       ├── export.py    # GET /api/projects/{id}/export/excel
 │       │       ├── corrections.py # PATCH /api/projects/{id}/corrections
-│       │       └── demo.py      # GET /api/demo/{name}
+│       │       ├── demo.py      # GET /api/demo/{name}
+│       │       └── dashboard.py # Dashboard CRUD: list, approve, detail, export, delete
 │       └── team/                # Expert Contractor Agent Team
 │           ├── __init__.py
 │           ├── orchestrator.py  # Team workflow coordinator (parallel count+keynote)
@@ -392,8 +395,10 @@ Medina/
 │   ├── test_text_counter.py
 │   ├── test_pipeline.py
 │   └── fixtures/                # Small test PDFs
+├── train/                       # Training xlsx files (5 ground truth inventories)
 ├── notebooks/                   # Jupyter exploration notebooks
 └── output/                      # Generated results (gitignored)
+    └── dashboard/               # Dashboard JSON + xlsx storage (auto-seeded)
 ```
 
 ## Expert Contractor Agent Team Architecture
@@ -1103,3 +1108,32 @@ Open http://127.0.0.1:3000 in browser.
 - Each plan gets its own section header (e.g., "E2.2 — 4 keynotes") followed by a 3-column table: #, Key Note text, Count.
 - Only keynotes with count > 0 on a given plan appear in that plan's table.
 - Plans with no keynotes show "No keynotes found on this plan."
+
+### Dashboard
+The app opens to a **Dashboard** view showing all approved projects as a card grid. Pre-seeded with 5 training xlsx files from `train/`.
+
+**View modes** (toggled via TopBar tabs):
+- `dashboard` — Card grid of approved projects with summary stats
+- `dashboard_detail` — Full fixture/keynote tables for a selected dashboard project (read-only)
+- `workspace` — Existing 3-panel processing workflow
+
+**Dashboard features:**
+- Summary stats bar: total projects, fixture types, fixtures, avg QA score
+- Project cards: name, fixture count, keynote count, plan count, QA badge, date
+- Click card → detail view with fixture table + per-plan keynote tables + Excel download
+- Delete with confirmation (click trash icon twice)
+- "Approve" button in TopBar (green, visible when workspace has `complete` results)
+- Approved projects show a checkmark badge instead of the approve button
+
+**Backend dashboard API (`/api/dashboard`):**
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/dashboard` | GET | List all approved projects (summary cards) |
+| `/api/dashboard/{id}` | GET | Full project data (fixtures, keynotes, QA) |
+| `/api/dashboard/{id}/export/excel` | GET | Download stored Excel file |
+| `/api/dashboard/approve/{project_id}` | POST | Approve workspace project → copy to dashboard |
+| `/api/dashboard/{id}` | DELETE | Remove from dashboard |
+
+**Storage:** `output/dashboard/` directory with `index.json` (project list) + per-project JSON and xlsx files.
+
+**Seed:** On first startup, `seed.py` parses 5 training xlsx files from `train/` using openpyxl and writes to `output/dashboard/`. Skips if `index.json` already exists. To re-seed, delete `output/dashboard/` and restart.

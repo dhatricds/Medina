@@ -29,6 +29,7 @@ data/
 uploads/
 *.xlsx
 !sample/**/*.xlsx
+!train/**/*.xlsx
 
 # OS
 .DS_Store

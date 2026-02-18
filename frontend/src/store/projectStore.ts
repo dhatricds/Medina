@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ProjectData, AgentInfo, AppState, Correction } from '../types';
+import type { ProjectData, AgentInfo, AppState, Correction, DashboardProject, ViewMode } from '../types';
 import {
   loadDemoData,
   uploadFile,
@@ -9,6 +9,11 @@ import {
   saveCorrections,
   listSources,
   getExcelDownloadUrl,
+  listDashboardProjects,
+  approveProject,
+  getDashboardProject,
+  deleteDashboardProject,
+  getDashboardExcelUrl,
 } from '../api/client';
 import type { SourceItem } from '../api/client';
 
@@ -73,6 +78,10 @@ function buildDemoAgents(data: ProjectData): AgentInfo[] {
 }
 
 interface ProjectStore {
+  // View mode
+  view: ViewMode;
+
+  // Workspace state
   appState: AppState;
   projectData: ProjectData | null;
   agents: AgentInfo[];
@@ -86,6 +95,24 @@ interface ProjectStore {
   sseActive: boolean;
   error: string | null;
 
+  // Dashboard state
+  dashboardProjects: DashboardProject[];
+  dashboardDetail: ProjectData | null;
+  dashboardDetailId: string | null;
+  approvedProjectIds: Set<string>;
+
+  // View actions
+  setView: (view: ViewMode) => void;
+
+  // Dashboard actions
+  loadDashboard: () => Promise<void>;
+  approveCurrentProject: () => Promise<void>;
+  viewDashboardProject: (id: string) => Promise<void>;
+  closeDashboardDetail: () => void;
+  removeDashboardProject: (id: string) => Promise<void>;
+  downloadDashboardExcel: (id: string) => void;
+
+  // Workspace actions
   setAppState: (state: AppState) => void;
   setProjectData: (data: ProjectData) => void;
   setAgents: (agents: AgentInfo[]) => void;
@@ -110,6 +137,10 @@ interface ProjectStore {
 }
 
 export const useProjectStore = create<ProjectStore>((set, get) => ({
+  // View mode — start on dashboard
+  view: 'dashboard',
+
+  // Workspace state
   appState: 'empty',
   projectData: null,
   agents: defaultAgents.map(a => ({ ...a })),
@@ -123,6 +154,76 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   sseActive: false,
   error: null,
 
+  // Dashboard state
+  dashboardProjects: [],
+  dashboardDetail: null,
+  dashboardDetailId: null,
+  approvedProjectIds: new Set(),
+
+  // View actions
+  setView: (view) => set({ view }),
+
+  // Dashboard actions
+  loadDashboard: async () => {
+    try {
+      const projects = await listDashboardProjects();
+      set({ dashboardProjects: projects });
+    } catch {
+      set({ dashboardProjects: [] });
+    }
+  },
+
+  approveCurrentProject: async () => {
+    const { projectId } = get();
+    if (!projectId) return;
+    try {
+      await approveProject(projectId);
+      // Refresh dashboard list
+      const projects = await listDashboardProjects();
+      set((s) => ({
+        dashboardProjects: projects,
+        approvedProjectIds: new Set([...s.approvedProjectIds, projectId]),
+        view: 'dashboard',
+      }));
+    } catch (e) {
+      console.error('Failed to approve project:', e);
+    }
+  },
+
+  viewDashboardProject: async (id: string) => {
+    try {
+      const data = await getDashboardProject(id);
+      set({
+        dashboardDetail: data,
+        dashboardDetailId: id,
+        view: 'dashboard_detail',
+      });
+    } catch (e) {
+      console.error('Failed to load dashboard project:', e);
+    }
+  },
+
+  closeDashboardDetail: () => set({
+    dashboardDetail: null,
+    dashboardDetailId: null,
+    view: 'dashboard',
+  }),
+
+  removeDashboardProject: async (id: string) => {
+    try {
+      await deleteDashboardProject(id);
+      const projects = await listDashboardProjects();
+      set({ dashboardProjects: projects });
+    } catch (e) {
+      console.error('Failed to delete dashboard project:', e);
+    }
+  },
+
+  downloadDashboardExcel: (id: string) => {
+    window.open(getDashboardExcelUrl(id), '_blank');
+  },
+
+  // Workspace actions
   setAppState: (state) => set({ appState: state }),
   setProjectData: (data) => set({ projectData: data }),
   setAgents: (agents) => set({ agents }),
@@ -193,6 +294,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       // Try backend API first
       const data = await loadDemoData(name);
       set({
+        view: 'workspace',
         appState: 'demo',
         projectData: data,
         agents: buildDemoAgents(data),
@@ -210,6 +312,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         if (!resp.ok) throw new Error('Demo data not available');
         const data: ProjectData = await resp.json();
         set({
+          view: 'workspace',
           appState: 'demo',
           projectData: data,
           agents: buildDemoAgents(data),
@@ -237,6 +340,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   uploadAndProcess: async (file: File) => {
     set({
+      view: 'workspace',
       appState: 'processing',
       agents: defaultAgents.map(a => ({ ...a })),
       corrections: [],
@@ -256,6 +360,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   processFromSource: async (sourcePath: string) => {
     set({
+      view: 'workspace',
       appState: 'processing',
       agents: defaultAgents.map(a => ({ ...a })),
       corrections: [],

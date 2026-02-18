@@ -1,4 +1,4 @@
-import type { ProjectData, Correction } from '../types';
+import type { ProjectData, Correction, DashboardProject } from '../types';
 
 const BASE = import.meta.env.VITE_API_URL ?? '';
 
@@ -98,6 +98,29 @@ export function saveCorrections(
 
 export function loadDemoData(name: string): Promise<ProjectData> {
   return fetchJson(`/api/demo/${name}`);
+}
+
+// --- Dashboard ---
+
+export function listDashboardProjects(): Promise<DashboardProject[]> {
+  return fetchJson('/api/dashboard');
+}
+
+export function approveProject(projectId: string): Promise<DashboardProject> {
+  return postJson(`/api/dashboard/approve/${projectId}`);
+}
+
+export function getDashboardProject(id: string): Promise<ProjectData> {
+  return fetchJson(`/api/dashboard/${id}`);
+}
+
+export async function deleteDashboardProject(id: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/dashboard/${id}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+}
+
+export function getDashboardExcelUrl(id: string): string {
+  return `${BASE}/api/dashboard/${id}/export/excel`;
 }
 
 // --- SSE URL ---

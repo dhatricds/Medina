@@ -83,3 +83,17 @@ export interface Correction {
   original: number;
   corrected: number;
 }
+
+export interface DashboardProject {
+  id: string;
+  name: string;
+  approved_at: string;
+  fixture_types: number;
+  total_fixtures: number;
+  keynote_count: number;
+  plan_count: number;
+  qa_score: number | null;
+  qa_passed: boolean | null;
+}
+
+export type ViewMode = 'workspace' | 'dashboard' | 'dashboard_detail';
