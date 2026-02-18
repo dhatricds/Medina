@@ -304,8 +304,18 @@ def run_pipeline(
             plan_pages_info, pdf_pages, fixture_codes
         )
 
-        # Vision-based counting (when enabled)
-        if use_vision and config.anthropic_api_key:
+        # Vision-based counting — triggers when:
+        #   1. User explicitly requested --use-vision, OR
+        #   2. Any single-char fixture codes exist (unreliable with text)
+        has_short_codes = any(len(fc) == 1 for fc in fixture_codes)
+        if has_short_codes and not use_vision:
+            short_list = [fc for fc in fixture_codes if len(fc) == 1]
+            report(
+                "COUNT",
+                f"Short fixture codes {short_list} — auto-triggering VLM recount",
+            )
+        should_run_vlm = (use_vision or has_short_codes) and config.anthropic_api_key
+        if should_run_vlm:
             report("COUNT", "Running vision-based counting (VLM)...")
             try:
                 from medina.pdf.renderer import render_page_to_image
@@ -339,17 +349,26 @@ def run_pipeline(
                     fixture_codes, config,
                 )
 
-                # Use vision counts as primary when available,
-                # fall back to text counts. Use higher confidence.
+                # Smart merge:
+                # - Single-char codes: VLM helps when within ±2
+                # - Multi-char codes: text is reliable, skip VLM
+                _MERGE_TOLERANCE = 2
                 for plan_code, v_counts in vision_counts.items():
                     t_counts = all_plan_counts.get(plan_code, {})
                     merged: dict[str, int] = {}
                     for fc in fixture_codes:
                         vc = v_counts.get(fc, 0)
                         tc = t_counts.get(fc, 0)
-                        # Use the higher count — vision is better at
-                        # identifying symbols, text is better at labels
-                        merged[fc] = max(vc, tc)
+                        if len(fc) > 1:
+                            merged[fc] = tc
+                            continue
+                        diff = abs(vc - tc)
+                        if tc == 0 and vc > 0:
+                            merged[fc] = vc
+                        elif diff <= _MERGE_TOLERANCE:
+                            merged[fc] = max(vc, tc)
+                        else:
+                            merged[fc] = tc
                     all_plan_counts[plan_code] = merged
                     logger.info(
                         "Merged text+vision for %s: %s",

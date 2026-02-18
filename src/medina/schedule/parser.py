@@ -245,27 +245,35 @@ def _extract_embedded_data_row(
                 has_embedded = True
             continue
 
-        # Space-separated: find the best matching header keyword and
-        # strip it from the cell to get the embedded data.
+        # Space-separated: find the most specific (longest) matching
+        # header keyword and strip it from the cell.  The longest
+        # pattern match leaves the shortest remainder — if the remainder
+        # is empty the cell is purely a header label with no embedded data.
         cell_lower = _normalise(cell)
         patterns = _COLUMN_PATTERNS.get(field_name, [])
-        best_remainder = ""
+        best_remainder: str | None = None
+        best_pattern_len = -1
         for pattern in patterns:
             if len(pattern) <= 3:
                 # Short pattern: must be exact prefix word
                 if cell_lower.startswith(pattern + " "):
                     remainder = cell[len(pattern):].strip()
-                    if len(remainder) > len(best_remainder):
+                    if len(pattern) > best_pattern_len:
+                        best_pattern_len = len(pattern)
                         best_remainder = remainder
                 elif cell_lower == pattern:
-                    pass  # Exact match, no embedded data
+                    # Exact match — no embedded data. Use longest pattern.
+                    if len(pattern) > best_pattern_len:
+                        best_pattern_len = len(pattern)
+                        best_remainder = ""
             else:
                 if pattern in cell_lower:
                     # Find the position after the pattern match
                     pos = cell_lower.find(pattern)
                     end = pos + len(pattern)
                     remainder = cell[end:].strip()
-                    if len(remainder) > len(best_remainder):
+                    if len(pattern) > best_pattern_len:
+                        best_pattern_len = len(pattern)
                         best_remainder = remainder
         if best_remainder:
             synth[col_idx] = best_remainder

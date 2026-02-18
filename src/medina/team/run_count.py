@@ -75,9 +75,27 @@ def run(source: str, work_dir: str, use_vision: bool = False) -> dict:
             plan_pages, pdf_pages, fixture_codes, plan_sheet_codes=plan_codes,
         )
 
-    # --- Vision-based counting (when enabled) ---
+    # --- Vision-based counting ---
+    # Triggers when:
+    #   1. User explicitly requested --use-vision, OR
+    #   2. Any single-char fixture codes exist (text counting is unreliable
+    #      for these — too many false positives/negatives from room labels,
+    #      panel refs, etc.)
     config = get_config()
-    if use_vision and config.anthropic_api_key and plan_pages:
+    has_short_codes = any(len(fc) == 1 for fc in fixture_codes)
+    should_run_vlm = (
+        (use_vision or has_short_codes)
+        and config.anthropic_api_key
+        and plan_pages
+    )
+    if has_short_codes and not use_vision:
+        short_list = [fc for fc in fixture_codes if len(fc) == 1]
+        logger.info(
+            "[COUNT] Short fixture codes detected %s — auto-triggering VLM recount",
+            short_list,
+        )
+
+    if should_run_vlm:
         logger.info("[COUNT] Running vision-based counting...")
         try:
             from medina.pdf.renderer import render_page_to_image
@@ -100,14 +118,42 @@ def run(source: str, work_dir: str, use_vision: bool = False) -> dict:
                 plan_pages, page_images, fixture_codes, config,
             )
 
-            # Merge: use the higher of text and vision counts
+            # Smart merge strategy:
+            # - Single-char codes (len=1): text counting is unreliable due
+            #   to false positives/negatives.  When text and VLM agree
+            #   (within ±2), take the higher value.  When they disagree
+            #   significantly (>2), prefer text (more conservative).
+            # - Multi-char codes (len≥2): text counting is already accurate.
+            #   Always keep text count — VLM tends to overcount on these.
+            _MERGE_TOLERANCE = 2
             for plan_code, v_counts in vision_counts.items():
                 t_counts = all_plan_counts.get(plan_code, {})
                 merged: dict[str, int] = {}
                 for fc in fixture_codes:
                     vc = v_counts.get(fc, 0)
                     tc = t_counts.get(fc, 0)
-                    merged[fc] = max(vc, tc)
+                    if len(fc) > 1:
+                        # Multi-char: text is reliable, skip VLM
+                        merged[fc] = tc
+                        if vc != tc and vc > 0:
+                            logger.debug(
+                                "[COUNT] %s on %s: text=%d, VLM=%d → keeping text (multi-char)",
+                                fc, plan_code, tc, vc,
+                            )
+                        continue
+                    diff = abs(vc - tc)
+                    if tc == 0 and vc > 0:
+                        merged[fc] = vc  # text missed entirely
+                    elif diff <= _MERGE_TOLERANCE:
+                        merged[fc] = max(vc, tc)  # close agreement
+                    else:
+                        merged[fc] = tc  # significant disagreement → text
+                    if vc != tc and vc > 0:
+                        logger.info(
+                            "[COUNT] %s on %s: text=%d, VLM=%d, diff=%d → using %d%s",
+                            fc, plan_code, tc, vc, diff, merged[fc],
+                            " (text wins, disagree)" if diff > _MERGE_TOLERANCE else "",
+                        )
                 all_plan_counts[plan_code] = merged
 
         except Exception as e:
