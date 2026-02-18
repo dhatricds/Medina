@@ -438,6 +438,32 @@ def crossref_vlm_codes(
             used_corrections,
         )
 
+    # Second pass: fix missing 'E' suffix on emergency fixtures.
+    # VLM sometimes drops the trailing 'E' (e.g., reads "WL1" for "WL1E").
+    # Detect this when: code doesn't end in E, code+'E' is on plan pages,
+    # code+'E' isn't already in the fixture list, and description mentions
+    # emergency-related terms.
+    _EMERGENCY_KW = ("EMERGENCY", "BATTERY PACK", "BATTERY BACKUP")
+    existing_codes = {f.code.upper() for f in corrected}
+    for i, fixture in enumerate(corrected):
+        code = fixture.code.upper()
+        if code.endswith("E"):
+            continue
+        code_e = code + "E"
+        if code_e not in plan_codes_upper:
+            continue
+        if code_e in existing_codes:
+            continue  # E-variant already present in schedule
+        desc_upper = fixture.description.upper()
+        if any(kw in desc_upper for kw in _EMERGENCY_KW):
+            logger.info(
+                "VLM code correction: %s -> %s (emergency description "
+                "+ plan code match)",
+                code, code_e,
+            )
+            corrected[i] = fixture.model_copy(update={"code": code_e})
+            used_corrections[code] = code_e
+
     return corrected
 
 

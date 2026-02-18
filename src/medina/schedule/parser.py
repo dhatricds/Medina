@@ -213,6 +213,67 @@ def _find_header_row(
     return best_idx, best_mapping
 
 
+def _extract_embedded_data_row(
+    header_row: list[str],
+    col_map: dict[int, str],
+) -> list[str] | None:
+    """Extract embedded data values from a merged header+data row.
+
+    When pdfplumber merges the header label and first data value into
+    a single cell (e.g. ``"MARK A"`` or ``"MARK\\nA"``), this function
+    strips the known header keyword from each mapped cell and returns
+    the remaining text as a synthetic data row.
+
+    Returns None if no embedded data is detected.
+    """
+    # Collect all header keywords that matched for each column.
+    # We need to know which keyword matched so we can strip it.
+    synth: list[str] = [""] * len(header_row)
+    has_embedded = False
+
+    for col_idx, field_name in col_map.items():
+        if col_idx >= len(header_row):
+            continue
+        cell = header_row[col_idx]
+
+        # Try newline split first (original cells before extractor clean).
+        if "\n" in cell:
+            parts = cell.split("\n", 1)
+            remainder = parts[1].strip()
+            if remainder:
+                synth[col_idx] = remainder
+                has_embedded = True
+            continue
+
+        # Space-separated: find the best matching header keyword and
+        # strip it from the cell to get the embedded data.
+        cell_lower = _normalise(cell)
+        patterns = _COLUMN_PATTERNS.get(field_name, [])
+        best_remainder = ""
+        for pattern in patterns:
+            if len(pattern) <= 3:
+                # Short pattern: must be exact prefix word
+                if cell_lower.startswith(pattern + " "):
+                    remainder = cell[len(pattern):].strip()
+                    if len(remainder) > len(best_remainder):
+                        best_remainder = remainder
+                elif cell_lower == pattern:
+                    pass  # Exact match, no embedded data
+            else:
+                if pattern in cell_lower:
+                    # Find the position after the pattern match
+                    pos = cell_lower.find(pattern)
+                    end = pos + len(pattern)
+                    remainder = cell[end:].strip()
+                    if len(remainder) > len(best_remainder):
+                        best_remainder = remainder
+        if best_remainder:
+            synth[col_idx] = best_remainder
+            has_embedded = True
+
+    return synth if has_embedded else None
+
+
 def _is_data_row(row: list[str], code_col: int) -> bool:
     """Return True if *row* looks like a fixture data row.
 
@@ -230,9 +291,14 @@ def _is_data_row(row: list[str], code_col: int) -> bool:
         return False
     # A fixture code is typically 1-4 alphanumeric characters, optionally
     # with a dash or period.
-    if re.match(r"^[A-Za-z0-9][A-Za-z0-9.\-/]*$", code):
-        return True
-    return False
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9.\-/]*$", code):
+        return False
+    # Pure-alphabetic codes longer than 3 chars are table headers
+    # (e.g., "SCHEDULES", "LIGHTING", "FIXTURE"), not fixture codes.
+    # Real pure-alpha fixture codes are short: A, B, EX, SL, WL.
+    if code.isalpha() and len(code) > 3:
+        return False
+    return True
 
 
 def _row_to_fixture(
@@ -399,6 +465,26 @@ def parse_schedule_table(
     )
 
     fixtures: list[FixtureRecord] = []
+
+    # Check for merged header+data cells: the header cell may contain
+    # the first data value appended after the header keyword.
+    # This happens when pdfplumber merges the header label and first
+    # data row into one cell. After extractor normalisation, the cell
+    # looks like "MARK A" (space-separated) instead of "MARK\nA".
+    # Strategy: for each mapped column, try to strip the matched header
+    # keyword from the cell text — any remainder is embedded data.
+    header_row = raw_table[header_idx]
+    synth_row = _extract_embedded_data_row(header_row, col_map)
+    if synth_row and _is_data_row(synth_row, code_col):
+        fixture = _row_to_fixture(synth_row, col_map)
+        fixtures.append(fixture)
+        logger.info(
+            "Extracted fixture %s from merged header cell "
+            "on %s",
+            fixture.code,
+            source_page or "unknown",
+        )
+
     for row_idx in range(header_idx + 1, len(raw_table)):
         row = raw_table[row_idx]
         if not _is_data_row(row, code_col):

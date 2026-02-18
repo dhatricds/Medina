@@ -181,17 +181,19 @@ def run_pipeline(
                 f"plan pages: {sorted(found_plan_codes)}",
             )
 
-    # VLM fallback: if pdfplumber found no fixtures but schedule pages
-    # exist, try VLM on each schedule page.  Covers both rasterized
-    # pages and pages with tables whose column headers don't match
-    # expected patterns (e.g., non-standard luminaire schedules).
-    if not fixtures and schedule_pages_info and config.anthropic_api_key:
+    # VLM fallback: if pdfplumber found no fixtures, try VLM.
+    # Prefer dedicated schedule pages; if none exist, try plan pages
+    # (combo pages may have embedded image-based schedule tables).
+    vlm_sched_candidates = (
+        schedule_pages_info if schedule_pages_info else plan_pages_info
+    )
+    if not fixtures and vlm_sched_candidates and config.anthropic_api_key:
         from medina.schedule.vlm_extractor import (
             extract_schedule_vlm,
         )
         from medina.pdf.renderer import render_page_to_image
 
-        for spage in schedule_pages_info:
+        for spage in vlm_sched_candidates:
             spdf = pdf_pages.get(spage.page_number)
             if spdf is None:
                 continue

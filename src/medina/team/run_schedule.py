@@ -22,6 +22,30 @@ logging.basicConfig(
 logger = logging.getLogger("medina.team.schedule")
 
 
+import re
+
+# Header words that should never be treated as fixture codes.
+_HEADER_WORDS = frozenset({
+    "SCHEDULE", "SCHEDULES", "LUMINAIRE", "FIXTURE", "FIXTURES",
+    "LIGHTING", "TYPE", "DESCRIPTION", "MARK", "SYMBOL", "CATALOG",
+    "MOUNTING", "VOLTAGE", "DIMMING", "WATTS", "WATTAGE",
+})
+
+
+def _is_valid_fixture_code(code: str) -> bool:
+    """Check if code looks like a real fixture identifier, not a table header."""
+    code = code.strip().upper()
+    if not code:
+        return False
+    if code in _HEADER_WORDS:
+        return False
+    # Pure alphabetic codes longer than 3 chars are table headers.
+    # Real pure-alpha fixture codes: A, B, EX, SL, WL (1-3 chars).
+    if code.isalpha() and len(code) > 3:
+        return False
+    return True
+
+
 def run(source: str, work_dir: str) -> dict:
     """Run stage 4: SCHEDULE EXTRACTION."""
     from medina.pdf.loader import load
@@ -98,19 +122,31 @@ def run(source: str, work_dir: str) -> dict:
                 sorted(found_plan_codes),
             )
 
-    # --- VLM fallback when pdfplumber extracted 0 fixtures ---
+    # --- Filter out invalid fixture codes (table headers, etc.) ---
+    before_filter = len(fixtures)
+    fixtures = [f for f in fixtures if _is_valid_fixture_code(f.code)]
+    if before_filter > len(fixtures):
+        logger.info(
+            "[SCHEDULE] Filtered out %d invalid fixture code(s)",
+            before_filter - len(fixtures),
+        )
+
+    # --- VLM fallback when pdfplumber extracted 0 valid fixtures ---
     # Triggered when: (a) pdfplumber found no fixtures, or (b) page has
     # image-based content.  Covers both truly rasterized pages and pages
     # with text tables whose column headers don't match expected patterns.
+    # When no dedicated schedule pages exist, try plan pages (combo pages
+    # may have embedded schedule tables that are image-based).
     config = get_config()
-    if not fixtures and schedule_pages and config.anthropic_api_key:
+    vlm_candidates = schedule_pages if schedule_pages else plan_pages
+    if not fixtures and vlm_candidates and config.anthropic_api_key:
         from medina.schedule.vlm_extractor import (
             extract_schedule_vlm,
         )
         from medina.pdf.renderer import render_page_to_image
         import base64
 
-        for spage in schedule_pages:
+        for spage in vlm_candidates:
             spdf = pdf_pages.get(spage.page_number)
             if spdf is None:
                 continue

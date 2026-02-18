@@ -90,9 +90,15 @@ def run(
         }
         fixture.total = sum(fixture.counts_per_plan.values())
 
-    # Keynote counts are already per-page from extraction — just
-    # recalculate totals from the counts_per_plan each keynote carries.
+    # Sync keynote counts from all_keynote_counts (which may include
+    # VLM-updated values) back into each keynote's counts_per_plan.
     for keynote in all_keynotes:
+        for plan_code in list(keynote.counts_per_plan):
+            if plan_code in all_keynote_counts:
+                keynote.counts_per_plan[plan_code] = (
+                    all_keynote_counts[plan_code]
+                    .get(str(keynote.number), 0)
+                )
         keynote.total = sum(keynote.counts_per_plan.values())
 
     # --- Build ExtractionResult ---

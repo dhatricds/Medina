@@ -126,6 +126,19 @@ def run(source: str, work_dir: str) -> dict:
             except ImportError:
                 logger.warning("[KEYNOTE] VLM keynote counter not available")
 
+    # --- Sync VLM-updated counts back into keynote objects ---
+    # VLM fallback updates all_keynote_counts but not the individual
+    # KeyNote.counts_per_plan.  Sync them so the saved JSON (and the
+    # frontend display) reflects the latest counts.
+    for kn in all_keynotes:
+        for plan_code in list(kn.counts_per_plan):
+            if plan_code in all_keynote_counts:
+                kn.counts_per_plan[plan_code] = (
+                    all_keynote_counts[plan_code]
+                    .get(str(kn.number), 0)
+                )
+        kn.total = sum(kn.counts_per_plan.values())
+
     logger.info(
         "[KEYNOTE] Extracted %d unique keynotes", len(all_keynotes),
     )

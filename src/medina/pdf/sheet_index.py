@@ -84,9 +84,38 @@ def discover_sheet_index(
         [p.page_number for p in candidate_pages],
     )
 
+    # Pre-identify dense pages to skip slow pdfplumber operations.
+    dense_pages: set[int] = set()
+    try:
+        import fitz as pymupdf
+        source_files: dict[str, list[PageInfo]] = {}
+        for p in candidate_pages:
+            source_files.setdefault(str(p.source_path), []).append(p)
+        for src, src_pages in source_files.items():
+            try:
+                doc = pymupdf.open(src)
+                for p in src_pages:
+                    if p.pdf_page_index < len(doc):
+                        sz = len(doc[p.pdf_page_index].read_contents())
+                        if sz > 10_000_000:
+                            dense_pages.add(p.page_number)
+                doc.close()
+            except Exception:
+                pass
+    except ImportError:
+        pass
+
     for page_info in candidate_pages:
         pdfp_page = pdf_pages.get(page_info.page_number)
         if pdfp_page is None:
+            continue
+
+        # Skip expensive operations on dense pages
+        if page_info.page_number in dense_pages:
+            logger.info(
+                "Skipping dense page %d for sheet index",
+                page_info.page_number,
+            )
             continue
 
         entries = _try_table_extraction(pdfp_page)
@@ -164,6 +193,20 @@ def _try_table_extraction(
     page: Any,
 ) -> list[SheetIndexEntry]:
     """Attempt to extract the sheet index from pdfplumber tables."""
+    # Fast pre-check: skip expensive table extraction on pages with
+    # very little text (image-heavy / rasterized PDFs).  extract_tables()
+    # can hang for minutes on pages with thousands of vector objects.
+    try:
+        quick_text = page.extract_text() or ""
+        if len(quick_text.strip()) < 20:
+            logger.debug(
+                "Skipping table extraction — page has minimal text (%d chars)",
+                len(quick_text.strip()),
+            )
+            return []
+    except Exception:
+        pass
+
     try:
         tables = page.extract_tables(
             table_settings={

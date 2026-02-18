@@ -29,6 +29,10 @@ def _build_prompt(
 ) -> str:
     """Build the vision prompt for counting keynote symbols.
 
+    Uses a chain-of-thought approach: first identify the shape from
+    the legend, then verify each candidate on the floor plan before
+    counting.  This prevents false positives from bare numbers.
+
     The two images sent are:
     1. The KEY NOTES legend (cropped from the right side)
     2. The floor plan drawing area (cropped, excluding legend/title)
@@ -38,39 +42,41 @@ def _build_prompt(
         "You are analyzing an electrical lighting plan drawing. "
         f"This is sheet {sheet_code}.\n\n"
         "IMAGE 1 (first image) shows the KEY NOTES LEGEND from the "
-        "right side of the drawing. It lists each keynote number and "
-        "its description. Look at this legend to understand what "
-        "keynote callout symbols look like in this drawing.\n\n"
-        "IMAGE 2 (second image) shows the FLOOR PLAN DRAWING area. "
-        "This is where you need to count keynote symbols.\n\n"
-        "TASK: Count how many times each of these keynote numbers "
-        f"appears as a CALLOUT SYMBOL on the floor plan: {nums_list}\n\n"
-        "WHAT IS A KEYNOTE CALLOUT SYMBOL:\n"
-        "A keynote callout is a small marker placed on the floor plan "
-        "to reference a numbered note. It is typically:\n"
-        "- A number inside a small diamond (rotated square) shape\n"
-        "- Or a number inside another geometric shape (hexagon, "
-        "triangle, circle)\n"
-        "- It is visually DISTINCT from other numbers on the drawing\n"
-        "- It has a clear geometric BORDER/OUTLINE around the number\n\n"
-        "WHAT IS NOT A KEYNOTE SYMBOL (do NOT count these):\n"
-        "- Circuit numbers: bare numbers (no border) next to wiring "
-        "lines and home runs — these are the MOST COMMON false positive\n"
-        "- Fixture type labels: letter+number combinations like A1, B6\n"
-        "- Dimension/measurement numbers: like 10'-0\", 4'-6\"\n"
-        "- Room numbers: large numbers labeling rooms\n"
-        "- Door numbers\n"
-        "- Switch numbers on switch legs\n"
-        "- Numbers in the title block\n"
-        "- Numbers in the KEY NOTES legend itself\n\n"
-        "THE KEY DIFFERENCE: Keynote symbols have a visible geometric "
-        "BORDER (diamond, hexagon, etc.) around the number. Circuit "
-        "numbers are just bare numbers with NO border. Look carefully "
-        "for the border before counting something as a keynote.\n\n"
-        "Return ONLY a JSON object with the count for each keynote. "
-        "If a keynote number does not appear as a callout symbol on "
-        "the plan, report 0.\n"
-        'Example format: {"5": 3, "6": 2, "7": 0}\n'
+        "right side of the drawing.\n"
+        "IMAGE 2 (second image) shows the FLOOR PLAN DRAWING area.\n\n"
+        f"Keynote numbers to find: {nums_list}\n\n"
+        "Follow these steps EXACTLY:\n\n"
+        "STEP 1 — IDENTIFY THE KEYNOTE SHAPE:\n"
+        "Look at IMAGE 1 (the legend). Each keynote number in the "
+        "legend is enclosed inside a specific geometric shape — "
+        "typically a CIRCLE, diamond, or hexagon. Identify which "
+        "shape is used. Write it down (e.g., 'circle').\n\n"
+        "STEP 2 — SCAN THE FLOOR PLAN AND VERIFY EACH CANDIDATE:\n"
+        "Look at IMAGE 2. For every number you see that matches one "
+        "of the keynote numbers above, check:\n"
+        "  Does this number have a CLOSED [shape from Step 1] drawn "
+        "around it?\n"
+        "  - If YES → it is a keynote callout. Note it.\n"
+        "  - If NO → it is NOT a keynote. Skip it.\n\n"
+        "MOST numbers on a floor plan are NOT keynotes. The vast "
+        "majority are:\n"
+        "- Circuit numbers (bare digits near wiring — NO shape)\n"
+        "- Home run numbers (bare digits with slash marks — NO shape)\n"
+        "- Switch leg numbers (bare digits — NO shape)\n"
+        "- Panel identifiers (bare digits near panels — NO shape)\n"
+        "- Fixture labels (letter+number like AL1, EX1 — NO shape)\n"
+        "ALL of the above are bare numbers WITHOUT a geometric shape "
+        "enclosing them. Do NOT count any of these.\n\n"
+        "A REAL keynote callout ALWAYS has a clearly visible closed "
+        "outline (the same shape you identified in Step 1) drawn "
+        "tightly around the number. If you cannot see that outline, "
+        "the number is not a keynote.\n\n"
+        "STEP 3 — PRODUCE COUNTS:\n"
+        "Based ONLY on the verified keynote callouts from Step 2, "
+        "produce a JSON object with the count for each keynote.\n\n"
+        "Respond with your Step 1 finding, then your Step 2 list, "
+        "then the final JSON on its own line.\n"
+        'Final JSON format: {"5": 1, "6": 1, "7": 0}\n'
     )
 
 
@@ -213,7 +219,7 @@ def count_keynotes_vision(
         client = Anthropic(api_key=config.anthropic_api_key)
         message = client.messages.create(
             model=config.vision_model,
-            max_tokens=1500,
+            max_tokens=4000,
             temperature=0,
             messages=[
                 {

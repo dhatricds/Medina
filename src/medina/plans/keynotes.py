@@ -152,12 +152,14 @@ def _parse_keynote_entries(section_text: str) -> list[tuple[str, str]]:
     # Filter: validate entries look like real keynotes.
     entries: list[tuple[str, str]] = []
     for num_str, text in raw_entries:
-        # Keynote numbers are typically 1-99.
+        # Keynote numbers are typically 1-20 (most projects have 1-10).
+        # Higher numbers are usually from general notes, specifications,
+        # or address text that leaked into the keynote region.
         try:
             num_val = int(num_str)
         except ValueError:
             continue
-        if num_val > 99:
+        if num_val > 20:
             logger.debug("Skipping keynote #%s: number too high", num_str)
             continue
 
@@ -511,6 +513,25 @@ def extract_keynotes_from_plan(
             "Keynotes header found but no numbered entries on plan %s", sheet
         )
         return keynotes, counts
+
+    # Deduplicate entries by keynote number — keep the first (longest) text
+    # for each number.  Duplicate numbers often arise when the region crop
+    # captures both a keynote section and adjacent general notes.
+    seen_nums: dict[str, int] = {}
+    deduped: list[tuple[str, str]] = []
+    for num, text in entries:
+        if num in seen_nums:
+            # Keep the entry with longer text (more descriptive).
+            idx = seen_nums[num]
+            if len(text) > len(deduped[idx][1]):
+                deduped[idx] = (num, text)
+            logger.debug(
+                "Duplicate keynote #%s on plan %s — merged", num, sheet,
+            )
+        else:
+            seen_nums[num] = len(deduped)
+            deduped.append((num, text))
+    entries = deduped
 
     logger.info("Found %d keynote entries on plan %s", len(entries), sheet)
 

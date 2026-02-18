@@ -158,9 +158,42 @@ def classify_pages(
                 entry.inferred_type
             )
 
+    # Pre-identify dense pages via fitz content stream size (instant).
+    # Dense pages have so many vector objects that pdfplumber's
+    # extract_text() hangs for minutes. We skip pdfplumber fallback
+    # on these pages.
+    dense_pages: set[int] = set()  # page_number set
+    try:
+        import fitz as pymupdf
+
+        # Group pages by source file to avoid re-opening PDFs
+        source_files: dict[str, list[PageInfo]] = {}
+        for p in pages:
+            key = str(p.source_path)
+            source_files.setdefault(key, []).append(p)
+
+        for src, src_pages in source_files.items():
+            try:
+                doc = pymupdf.open(src)
+                for p in src_pages:
+                    if p.pdf_page_index < len(doc):
+                        stream_sz = len(
+                            doc[p.pdf_page_index].read_contents()
+                        )
+                        if stream_sz > 10_000_000:
+                            dense_pages.add(p.page_number)
+                doc.close()
+            except Exception:
+                pass
+    except ImportError:
+        pass
+
     for page in pages:
         page_type = _classify_single(
-            page, pdf_pages.get(page.page_number), index_lookup
+            page,
+            pdf_pages.get(page.page_number),
+            index_lookup,
+            skip_pdfplumber=(page.page_number in dense_pages),
         )
         page.page_type = page_type
         logger.debug(
@@ -177,6 +210,7 @@ def _classify_single(
     page: PageInfo,
     pdfp_page: Any | None,
     index_lookup: dict[str, PageType],
+    skip_pdfplumber: bool = False,
 ) -> PageType:
     """Classify a single page through the priority chain."""
     code_upper = (page.sheet_code or "").upper()
@@ -190,8 +224,17 @@ def _classify_single(
         )
         return index_lookup[code_upper]
 
-    # Priority 2: Title block content (most reliable self-description)
-    if pdfp_page is not None:
+    # Priority 2: Title block content (most reliable self-description).
+    # Try fitz first (fast on ALL pages including dense vector).
+    result = _classify_title_block_fitz(
+        page.source_path, page.pdf_page_index
+    )
+    if result is not None:
+        return result
+
+    # Fall back to pdfplumber title block (skipped for dense pages
+    # where extract_text would hang for minutes).
+    if pdfp_page is not None and not skip_pdfplumber:
         result = _classify_from_title_block(pdfp_page)
         if result is not None:
             return result
@@ -206,7 +249,7 @@ def _classify_single(
             return result
 
     # Priority 4: Full-page content keyword scan
-    if pdfp_page is not None:
+    if pdfp_page is not None and not skip_pdfplumber:
         result = _classify_by_content(pdfp_page)
         if result is not None:
             return result
@@ -277,6 +320,59 @@ def _classify_by_content(page: Any) -> PageType | None:
     return None
 
 
+def _classify_title_block_fitz(
+    source_path: Any,
+    pdf_page_index: int,
+) -> PageType | None:
+    """Fast-path title block classification using PyMuPDF (fitz).
+
+    Used to avoid pdfplumber's slow extract_text on pages with
+    extreme vector density (millions of line objects).
+    """
+    try:
+        import fitz as pymupdf
+        doc = pymupdf.open(str(source_path))
+        if pdf_page_index >= len(doc):
+            doc.close()
+            return None
+        fitz_page = doc[pdf_page_index]
+        rect = fitz_page.rect
+        clip = pymupdf.Rect(
+            rect.width * 0.55,
+            rect.height * 0.85,
+            rect.width,
+            rect.height,
+        )
+        raw_text = fitz_page.get_text("text", clip=clip)
+        doc.close()
+    except Exception:
+        return None
+
+    title_text = " ".join((raw_text or "").lower().split())
+    if not title_text:
+        return None
+
+    _TITLE_KEYWORDS_LOCAL: list[tuple[list[str], PageType]] = [
+        (["demolition", "demo plan"], PageType.DEMOLITION_PLAN),
+        (["site plan", "site layout", "photometric"], PageType.SITE_PLAN),
+        (["cover sheet", "title sheet", "coversheet"], PageType.COVER),
+        (["electrical symbols", "abbreviation", "legend"], PageType.SYMBOLS_LEGEND),
+        (["lighting plan", "lighting layout"], PageType.LIGHTING_PLAN),
+        (["luminaire schedule", "lighting schedule", "fixture schedule",
+          "electrical schedules"], PageType.SCHEDULE),
+        (["power plan", "power layout", "power &", "systems plan",
+          "electrical plan"], PageType.POWER_PLAN),
+        (["fire alarm"], PageType.FIRE_ALARM),
+        (["detail"], PageType.DETAIL),
+    ]
+
+    for keywords, page_type in _TITLE_KEYWORDS_LOCAL:
+        if any(kw in title_text for kw in keywords):
+            return page_type
+
+    return None
+
+
 def _classify_from_title_block(page: Any) -> PageType | None:
     """Classify a page by its title block description.
 
@@ -321,6 +417,7 @@ def _classify_from_title_block(page: Any) -> PageType | None:
             ["roof electrical plan", "electrical roof plan"],
             PageType.OTHER,
         ),
+        (["cover sheet", "title sheet", "coversheet"], PageType.COVER),
         (
             ["electrical symbols", "abbreviation", "legend"],
             PageType.SYMBOLS_LEGEND,
@@ -353,15 +450,14 @@ def _classify_from_title_block(page: Any) -> PageType | None:
         ),
         (
             [
-                "power plan", "power layout",
-                "electrical plan",
+                "power plan", "power layout", "power &",
+                "systems plan", "electrical plan",
             ],
             PageType.POWER_PLAN,
         ),
         (["fire alarm"], PageType.FIRE_ALARM),
         (["riser diagram", "riser"], PageType.RISER),
         (["detail"], PageType.DETAIL),
-        (["cover sheet", "title sheet", "coversheet"], PageType.COVER),
     ]
 
     for keywords, page_type in _TITLE_KEYWORDS:

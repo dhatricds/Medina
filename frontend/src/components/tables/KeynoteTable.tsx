@@ -12,10 +12,10 @@ export default function KeynoteTable() {
     addCorrection({ type: 'keynote', identifier: keynoteNumber, sheet: plan, original, corrected: newCount });
   };
 
-  // Group keynotes by plan — only show keynotes that appear on each plan (count > 0)
+  // Group keynotes by plan — show all keynotes defined on each plan
   const keynotesByPlan = plans.map((plan) => {
     const planKeynotes = projectData.keynotes.filter(
-      (kn) => (kn.counts_per_plan[plan] ?? 0) > 0
+      (kn) => kn.counts_per_plan[plan] !== undefined
     );
     return { plan, keynotes: planKeynotes };
   });

@@ -462,6 +462,7 @@ uv run python -m medina.team.run_qa data/24031_15_Elec.pdf output/work_dir outpu
 |---------|----------|----------|-----|------|
 | HCMC (24031_15_Elec) | 13 types, 125 total | #1=6, #2=1, #3=1 | 98.0% PASS | ~85s |
 | Anoka Dispensary | 10 types, 59 total | #1=4, #2=1 | 97.0% PASS | ~43s |
+| DENIS-1266 (VLM) | 14 types, 32 total (14/14 exact) | 10 keynotes, 9/10 per-plan match | 93.4% | ~85s |
 
 ## Core Data Models
 
@@ -739,7 +740,7 @@ Runs cross-checks on the extracted data:
 |-------|-------------------|-------------------|
 | **Schedule completeness** | All expected columns found? Any empty rows? | -5% per missing column |
 | **Text vs vision agreement** | If both methods ran, do counts match? | -10% per fixture with >20% disagreement |
-| **Zero-count fixtures** | Any schedule fixtures found 0 times on all plans? | -3% per zero-count (may be valid for alternates) |
+| **Zero-count fixtures** | Any schedule fixtures found 0 times on all plans? | -10% per item + -1% overall per zero-count (may be valid for alternates) |
 | **Fixture code ambiguity** | Could a code match non-fixture text (e.g., room "E3")? | -5% per ambiguous code |
 | **Keynote consistency** | Same keynotes found on all plans where expected? | -2% per inconsistency |
 | **Sheet index coverage** | Did we find all pages listed in the sheet index? | -5% if pages missing |
@@ -915,13 +916,16 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 - **Stage 7 (OUTPUT)**: Excel and JSON generation with dynamic columns
 - **Web UI**: React + Tailwind frontend with FastAPI backend. 3-panel layout (PDF viewer | Agent pipeline | Editable tables). Demo mode, library source picker, file upload, SSE agent progress, editable cells.
 
-### Validated Projects
+### Validated Projects (Training Set)
 | Project | Type | Plans | Schedules | Fixtures | Keynotes | QA | Notes |
 |---------|------|-------|-----------|----------|----------|-----|-------|
-| HCMC (24031_15_Elec.pdf) | Single PDF | E200 | E600 | 13 types | #1=6,#2=1,#3=1 | 98% Pass | 9/13 fixture counts match GT, 4 off by 1-2 |
+| HCMC (24031_15_Elec.pdf) | Single PDF | E200 | E600 | 13 types, 125 total | #1=6,#2=1,#3=1 | 98% Pass | 11/12 exact match (B6 +1) |
+| DENIS 11CD | Single PDF | E101-E103 | - | 0 (no schedule) | 0 | - | 3 plans correctly identified |
+| DENIS 1220 | Single PDF | E2.2 | E4.1 | 2 types (R1=11,S3=30) | #1=1,#2=6,#3=1,#4=3 | - | All exact match |
+| DENIS 12E2 | Single PDF | E1.1, E1.2 | E4.1, E4.2 | 5 types (A6=45,B1=2,D6=8,E1=2,F4=0) | - | - | All types match GT |
+| DENIS 1266 (VLM) | Single PDF | FE10691-010,011 | FE10691-013 (rasterized) | 14 types, 32 total (14/14 exact) | 10 keynotes, 9/10 per-plan match | 93.4% | VLM schedule+keynote fallback |
 | Anoka Dispensary | Single PDF | E301 | E901 | 10 types | #1=4,#2=1 | 97% Pass | 6/10 fixture counts match, short codes overcount |
 | Dental Hygiene Lab | Single PDF | - | - | 0 (garbled text) | - | 97.8% Pass (vacuous) | Needs OCR/VLM fallback |
-| DENIS 12E2 | Single PDF | E1.1, E1.2 | E4.1, E4.2 | 5 types (A6,B1,D6,E1,F4) | - | - | E0.0 misclassification fixed |
 
 #### HCMC Fixture Count Detail (after char-level fix)
 | Code | Pipeline | Ground Truth | Delta |
@@ -977,6 +981,10 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 - **Symbols/legend keyword priority (FIXED)**: In `_TITLE_KEYWORDS`, symbols/legend keywords now checked before schedule keywords to prevent symbols pages from being classified as schedule.
 - **VLM schedule fallback too restrictive (FIXED)**: Was gated by `has_image_based_content` / `has_minimal_text`. Now triggers for any schedule page when pdfplumber finds 0 fixtures.
 - **Per-page keynote merging bug (FIXED)**: `extract_all_keynotes()` merged keynotes by number across pages, losing per-page text when different pages had different keynotes with same numbers. Now keeps per-page keynotes separate.
+- **"SCHEDULES" parsed as fixture code (FIXED)**: Rasterized schedule pages (e.g., DENIS-1266) produce a merged header cell "SCHEDULES" that was accepted as a fixture code, blocking VLM fallback. Fixed by: (1) `_is_data_row()` in parser.py now rejects pure-alpha codes >3 chars; (2) `run_schedule.py` filters fixtures through `_is_valid_fixture_code()` before VLM fallback check.
+- **Single-char fixture code overcounting (FIXED)**: Letter "A" appears 324 times on DENIS-00C6 plans. Fixed with three techniques: (1) isolation check — 1-char codes must have no nearby characters within 15pt on the same line; (2) tighter font tolerance (±15% of modal size vs ±20% for longer codes); (3) spatial de-duplication (70pt Euclidean distance). All scoped to `len(code) == 1` only to avoid regression on 2-char codes.
+- **Keynote false positives (FIXED)**: Max keynote number reduced from 99 to 20 to reject false positives from addresses/notes. Per-page dedup added — duplicate keynote numbers within same page are merged (keeps longer text).
+- **QA zero-count penalty too harsh (FIXED)**: Reduced from -30% per fixture + -3% overall to -10% per fixture + -1% overall. Schedules often include alternates/spares not used on project's plans.
 
 ### In Progress (Agent Team Validation)
 - **Elk River Gym** (folder input, 2 plans after dedup) — schedule on combo page, 2 fixture types (G18, G22), 3 keynotes. Testing cross-ref filtering.
@@ -1004,7 +1012,7 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 6. **Scanned vs vector PDFs** — PARTIALLY SOLVED: VLM fallback for image-based schedules. OCR fallback available via pytesseract.
 7. **Cross-document context** — SOLVED: Sheet index from cover page ties together fixture codes across separate plan/schedule PDFs in folder input.
 8. **QA confidence calibration** — IN PROGRESS: Being tuned against real projects via agent team validation.
-9. **DENIS fixture code accuracy** — IN PROGRESS: VLM schedule extraction may misread codes (e.g., "A1" vs "AL1"). VLM prompt improved with explicit multi-letter prefix guidance. Testing in progress.
+9. **DENIS fixture code accuracy** — SOLVED: VLM schedule extraction with plan-code cross-referencing correctly reads codes (AL1, WL1E, etc.). Emergency E-suffix correction handles VLM dropping trailing 'E'. Validated on DENIS-1266: 14/14 fixture codes and counts exact match.
 10. **VLM counting unreliability** — DOCUMENTED: Claude Vision API produces inconsistent results for counting small symbols on engineering drawings. Mitigated by using geometric detection as primary method.
 11. **Custom font encoding** — OPEN: Some PDFs (e.g., Dental Hygiene Lab) use character substitution ciphers that produce garbled text from pdfplumber/PyMuPDF. Need automatic detection (low ASCII letter ratio) and full OCR/VLM fallback for entire pipeline, not just schedule extraction.
 12. **Fixture text-counting overcounting** — PARTIALLY SOLVED: Schedule table exclusion for combo pages and cross-reference filtering for sheet-code fixtures. Short code overcounting (Anoka: A=17 vs GT 14) still open — needs tighter spatial filtering or vision fallback.

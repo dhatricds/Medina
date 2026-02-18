@@ -7,12 +7,17 @@ import re
 from pathlib import Path
 from typing import Any
 
+import fitz as pymupdf
 import pdfplumber
 
 from medina.exceptions import PDFLoadError
 from medina.models import PageInfo, PageType
 
 logger = logging.getLogger(__name__)
+
+# In-memory cache: avoids reloading the same PDF across multiple agents
+# in a single process.  Key = resolved absolute path string.
+_load_cache: dict[str, tuple[list[PageInfo], dict[int, Any]]] = {}
 
 # Pattern for folder-of-PDFs naming: [NUMBER]---[SHEET-CODE] [DESC].pdf
 _FOLDER_FILE_RE = re.compile(
@@ -31,34 +36,51 @@ _BROAD_SHEET_CODE_RE = re.compile(
     r"\b([A-Z]{1,3}\d{3,}[-]\d{2,3})\b",
 )
 
+# Pages with content streams larger than this are too dense for
+# pdfplumber to extract text in reasonable time.  Checked via fitz
+# (instant — reads raw byte length without parsing).
+_MAX_CONTENT_STREAM_BYTES = 10_000_000  # 10 MB
+
+
+def clear_load_cache() -> None:
+    """Clear the in-memory PDF load cache."""
+    _load_cache.clear()
+
 
 def load(
     source: str | Path,
 ) -> tuple[list[PageInfo], dict[int, Any]]:
     """Load pages from a PDF file or folder of PDFs.
 
-    Args:
-        source: Path to a single PDF or a directory of individual PDFs.
+    Uses PyMuPDF (fitz) for fast sheet code / title extraction on
+    dense vector pages, falling back to pdfplumber for normal pages.
+    Always opens pdfplumber for downstream use (table extraction,
+    char-level analysis, line geometry).
 
     Returns:
         Tuple of (page_infos, pdf_pages_dict) where pdf_pages_dict maps
         page_number to the pdfplumber page object.
-
-    Raises:
-        PDFLoadError: If the source cannot be loaded.
     """
     source = Path(source)
     if not source.exists():
         raise PDFLoadError(f"Source path does not exist: {source}")
 
+    cache_key = str(source.resolve())
+    if cache_key in _load_cache:
+        logger.info("Returning cached load for %s", source.name)
+        return _load_cache[cache_key]
+
     if source.is_file():
-        return _load_single_pdf(source)
+        result = _load_single_pdf(source)
     elif source.is_dir():
-        return _load_folder(source)
+        result = _load_folder(source)
     else:
         raise PDFLoadError(
             f"Source is neither a file nor directory: {source}"
         )
+
+    _load_cache[cache_key] = result
+    return result
 
 
 def _load_single_pdf(
@@ -66,9 +88,47 @@ def _load_single_pdf(
 ) -> tuple[list[PageInfo], dict[int, Any]]:
     """Load a single multi-page PDF file.
 
-    Extracts sheet codes from the title block area of each page.
+    For each page:
+    1. Check content stream size with fitz (instant, no parsing).
+    2. If dense (>10MB stream): use fitz for sheet code extraction.
+    3. If normal: use pdfplumber (more reliable on typical PDFs).
+    4. Always keep pdfplumber page objects for downstream use.
     """
     logger.info("Loading single PDF: %s", pdf_path)
+
+    # --- Identify dense pages via fitz (instant check) ---
+    try:
+        fitz_doc = pymupdf.open(str(pdf_path))
+    except Exception as exc:
+        raise PDFLoadError(
+            f"Failed to open PDF {pdf_path}: {exc}"
+        ) from exc
+
+    dense_pages: set[int] = set()  # 0-indexed
+    fitz_codes: dict[int, tuple[str | None, str | None]] = {}
+
+    for idx in range(len(fitz_doc)):
+        fitz_page = fitz_doc[idx]
+        try:
+            stream_size = len(fitz_page.read_contents())
+        except Exception:
+            stream_size = 0
+        if stream_size > _MAX_CONTENT_STREAM_BYTES:
+            dense_pages.add(idx)
+            # Extract sheet code via fitz for dense pages
+            code = _fitz_extract_sheet_code(fitz_page)
+            title = _fitz_extract_sheet_title(fitz_page, code)
+            fitz_codes[idx] = (code, title)
+            logger.info(
+                "Page %d: dense (%d MB stream) — using fitz "
+                "for metadata",
+                idx + 1,
+                stream_size // 1_000_000,
+            )
+
+    fitz_doc.close()
+
+    # --- Open with pdfplumber ---
     try:
         pdf = pdfplumber.open(pdf_path)
     except Exception as exc:
@@ -81,8 +141,14 @@ def _load_single_pdf(
 
     for idx, page in enumerate(pdf.pages):
         page_num = idx + 1
-        sheet_code = _extract_sheet_code_from_title_block(page)
-        sheet_title = _extract_sheet_title(page, sheet_code)
+
+        if idx in dense_pages:
+            # Use fitz-extracted metadata (skip pdfplumber text ops)
+            sheet_code, sheet_title = fitz_codes[idx]
+        else:
+            # Normal page: pdfplumber extraction is fast and reliable
+            sheet_code = _extract_sheet_code_from_title_block(page)
+            sheet_title = _extract_sheet_title(page, sheet_code)
 
         info = PageInfo(
             page_number=page_num,
@@ -96,7 +162,10 @@ def _load_single_pdf(
         pdf_pages[page_num] = page
 
     logger.info(
-        "Loaded %d pages from %s", len(pages), pdf_path.name
+        "Loaded %d pages from %s (%d dense)",
+        len(pages),
+        pdf_path.name,
+        len(dense_pages),
     )
     return pages, pdf_pages
 
@@ -108,13 +177,15 @@ def _load_folder(
 
     Files are expected to follow the naming convention:
     ``[NUMBER]---[SHEET-CODE] [DESCRIPTION].pdf``
-    Files that don't match the pattern are loaded with best-effort
-    parsing.
     """
     logger.info("Loading PDF folder: %s", folder_path)
 
     pdf_files = sorted(
-        [f for f in folder_path.iterdir() if f.suffix.lower() == ".pdf"],
+        [
+            f
+            for f in folder_path.iterdir()
+            if f.suffix.lower() == ".pdf"
+        ],
         key=lambda f: _sort_key_for_file(f),
     )
 
@@ -126,8 +197,9 @@ def _load_folder(
     pages: list[PageInfo] = []
     pdf_pages: dict[int, Any] = {}
 
-    # First pass: load all files and resolve true sheet codes from title blocks.
-    raw_entries: list[tuple[Path, str | None, str | None, Any]] = []
+    raw_entries: list[
+        tuple[Path, str | None, str | None, Any]
+    ] = []
     for pdf_file in pdf_files:
         filename_code, sheet_title = _parse_filename(pdf_file)
 
@@ -150,17 +222,34 @@ def _load_folder(
 
         pdfplumber_page = pdf.pages[0]
 
-        # Always check title block for the canonical sheet code.
-        title_block_code = _extract_sheet_code_from_title_block(pdfplumber_page)
+        # Check density via fitz first
+        title_block_code = None
+        try:
+            fitz_doc = pymupdf.open(str(pdf_file))
+            stream_size = len(fitz_doc[0].read_contents())
+            if stream_size > _MAX_CONTENT_STREAM_BYTES:
+                title_block_code = _fitz_extract_sheet_code(
+                    fitz_doc[0]
+                )
+            fitz_doc.close()
+        except Exception:
+            pass
+
+        if title_block_code is None:
+            title_block_code = _extract_sheet_code_from_title_block(
+                pdfplumber_page
+            )
+
         sheet_code = title_block_code or filename_code
+        raw_entries.append(
+            (pdf_file, sheet_code, sheet_title, pdfplumber_page)
+        )
 
-        raw_entries.append((pdf_file, sheet_code, sheet_title, pdfplumber_page))
-
-    # Deduplicate: when multiple files share the same sheet code (e.g.,
-    # original + addendum), keep only the last one (highest file number
-    # = latest revision). Files are already sorted by number prefix.
+    # Deduplicate by sheet code (keep latest revision)
     seen_codes: dict[str, int] = {}
-    for idx, (pdf_file, sheet_code, _title, _page) in enumerate(raw_entries):
+    for idx, (pdf_file, sheet_code, _title, _page) in enumerate(
+        raw_entries
+    ):
         if sheet_code:
             code_upper = sheet_code.upper()
             if code_upper in seen_codes:
@@ -168,14 +257,16 @@ def _load_folder(
                 prev_file = raw_entries[prev_idx][0]
                 logger.info(
                     "Sheet %s: replacing %s with newer revision %s",
-                    code_upper, prev_file.name, pdf_file.name,
+                    code_upper,
+                    prev_file.name,
+                    pdf_file.name,
                 )
             seen_codes[code_upper] = idx
 
-    # Build the final set: for duplicated codes keep only the latest;
-    # for unique codes or unknown codes, keep everything.
     keep_indices: set[int] = set()
-    for idx, (_file, sheet_code, _title, _page) in enumerate(raw_entries):
+    for idx, (_file, sheet_code, _title, _page) in enumerate(
+        raw_entries
+    ):
         if sheet_code:
             code_upper = sheet_code.upper()
             if seen_codes.get(code_upper) == idx:
@@ -184,9 +275,16 @@ def _load_folder(
             keep_indices.add(idx)
 
     page_num = 0
-    for idx, (pdf_file, sheet_code, sheet_title, pdfplumber_page) in enumerate(raw_entries):
+    for idx, (
+        pdf_file,
+        sheet_code,
+        sheet_title,
+        pdfplumber_page,
+    ) in enumerate(raw_entries):
         if idx not in keep_indices:
-            logger.debug("Skipping superseded file: %s", pdf_file.name)
+            logger.debug(
+                "Skipping superseded file: %s", pdf_file.name
+            )
             continue
         page_num += 1
 
@@ -209,7 +307,145 @@ def _load_folder(
     return pages, pdf_pages
 
 
-# ── Private helpers ─────────────────────────────────────────────
+# ── fitz-based fast extraction (for dense pages) ─────────────
+
+
+def _fitz_extract_sheet_code(page: Any) -> str | None:
+    """Extract sheet code from title block using PyMuPDF (fitz)."""
+    rect = page.rect
+    clip = pymupdf.Rect(
+        rect.width * 0.60,
+        rect.height * 0.80,
+        rect.width,
+        rect.height,
+    )
+    try:
+        text = page.get_text("text", clip=clip)
+    except Exception:
+        return None
+
+    return _find_sheet_code_in_text(text)
+
+
+def _fitz_extract_sheet_title(
+    page: Any,
+    sheet_code: str | None,
+) -> str | None:
+    """Extract sheet title from title block using PyMuPDF (fitz)."""
+    rect = page.rect
+    clip = pymupdf.Rect(
+        rect.width * 0.55,
+        rect.height * 0.85,
+        rect.width,
+        rect.height,
+    )
+    try:
+        text = page.get_text("text", clip=clip)
+    except Exception:
+        return None
+
+    if not text or not text.strip():
+        return None
+
+    lines = [
+        ln.strip()
+        for ln in text.split("\n")
+        if ln.strip()
+        and ln.strip().upper() != (sheet_code or "")
+    ]
+    if lines:
+        return max(lines, key=len)
+    return None
+
+
+# ── pdfplumber-based extraction (for normal pages) ───────────
+
+
+def _extract_sheet_code_from_title_block(
+    page: Any,
+) -> str | None:
+    """Extract sheet code from title block using pdfplumber."""
+    width = page.width
+    height = page.height
+
+    bbox = (
+        width * 0.60,
+        height * 0.80,
+        width,
+        height,
+    )
+    try:
+        cropped = page.within_bbox(bbox)
+        text = cropped.extract_text() or ""
+    except Exception:
+        text = ""
+
+    return _find_sheet_code_in_text(text)
+
+
+def _extract_sheet_title(
+    page: Any,
+    sheet_code: str | None,
+) -> str | None:
+    """Extract sheet title from title block using pdfplumber."""
+    width = page.width
+    height = page.height
+
+    bbox = (
+        width * 0.55,
+        height * 0.85,
+        width,
+        height,
+    )
+    try:
+        cropped = page.within_bbox(bbox)
+        text = cropped.extract_text() or ""
+    except Exception:
+        return None
+
+    if not text:
+        return None
+
+    lines = [
+        ln.strip()
+        for ln in text.split("\n")
+        if ln.strip()
+        and ln.strip().upper() != (sheet_code or "")
+    ]
+    if lines:
+        return max(lines, key=len)
+    return None
+
+
+# ── Shared helpers ───────────────────────────────────────────
+
+
+def _find_sheet_code_in_text(text: str | None) -> str | None:
+    """Search for a sheet code in title block text."""
+    if not text or not text.strip():
+        return None
+
+    for line in reversed(text.split("\n")):
+        line = line.strip()
+        if not line:
+            continue
+        code_match = _SHEET_CODE_RE.search(line)
+        if code_match:
+            return code_match.group(1).upper()
+
+    for line in reversed(text.split("\n")):
+        line = line.strip()
+        broad_match = _BROAD_SHEET_CODE_RE.search(line)
+        if broad_match:
+            return broad_match.group(1).upper()
+
+    generic_re = re.compile(r"\b([A-Z]{1,2}\d{1,4}[A-Za-z]?)\b")
+    for line in reversed(text.split("\n")):
+        match = generic_re.search(line.strip())
+        if match:
+            return match.group(1).upper()
+
+    return None
 
 
 def _sort_key_for_file(path: Path) -> tuple[int, str]:
@@ -234,96 +470,8 @@ def _parse_filename(
         description = match.group(3).strip()
         return sheet_code, description
 
-    # Best-effort: try to find a sheet code anywhere in filename
     stem = pdf_file.stem
     code_match = _SHEET_CODE_RE.search(stem)
     if code_match:
         return code_match.group(1).upper(), stem
     return None, stem
-
-
-def _extract_sheet_code_from_title_block(
-    page: Any,
-) -> str | None:
-    """Attempt to read the sheet code from the title block area.
-
-    Title blocks are typically in the bottom-right ~25% of the page.
-    """
-    width = page.width
-    height = page.height
-
-    # Crop to bottom-right quadrant where title blocks reside.
-    bbox = (
-        width * 0.60,   # left
-        height * 0.80,  # top
-        width,           # right
-        height,          # bottom
-    )
-    try:
-        cropped = page.within_bbox(bbox)
-        text = cropped.extract_text() or ""
-    except Exception:
-        # within_bbox can fail on unusual page layouts
-        text = ""
-
-    if not text:
-        return None
-
-    # Look for a standalone sheet code like E200, E1A, E001, CS
-    # Try electrical sheet codes first.
-    for line in reversed(text.split("\n")):
-        line = line.strip()
-        code_match = _SHEET_CODE_RE.search(line)
-        if code_match:
-            return code_match.group(1).upper()
-
-    # Try broader patterns for non-standard codes (FE10691-013)
-    for line in reversed(text.split("\n")):
-        line = line.strip()
-        broad_match = _BROAD_SHEET_CODE_RE.search(line)
-        if broad_match:
-            return broad_match.group(1).upper()
-
-    # Also try generic sheet codes (CS, A1, etc.)
-    generic_re = re.compile(r"\b([A-Z]{1,2}\d{1,4}[A-Za-z]?)\b")
-    for line in reversed(text.split("\n")):
-        match = generic_re.search(line.strip())
-        if match:
-            return match.group(1).upper()
-
-    return None
-
-
-def _extract_sheet_title(
-    page: Any,
-    sheet_code: str | None,
-) -> str | None:
-    """Attempt to extract the sheet title from near the title block."""
-    width = page.width
-    height = page.height
-
-    bbox = (
-        width * 0.55,
-        height * 0.85,
-        width,
-        height,
-    )
-    try:
-        cropped = page.within_bbox(bbox)
-        text = cropped.extract_text() or ""
-    except Exception:
-        return None
-
-    if not text:
-        return None
-
-    # Return the longest line that isn't the sheet code itself,
-    # as it's likely the title.
-    lines = [
-        ln.strip()
-        for ln in text.split("\n")
-        if ln.strip() and ln.strip().upper() != (sheet_code or "")
-    ]
-    if lines:
-        return max(lines, key=len)
-    return None

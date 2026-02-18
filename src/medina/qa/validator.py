@@ -86,7 +86,9 @@ def validate_fixture_counts(
         notes_parts: list[str] = []
 
         if fixture.total == 0:
-            item_score -= 0.3
+            # Mild penalty: schedules often include alternates/spares
+            # not used on every project's plans.
+            item_score -= 0.1
             flags.append(ConfidenceFlag.FIXTURE_NOT_ON_ANY_PLAN)
             notes_parts.append("Not found on any plan page")
             warnings.append(
@@ -126,7 +128,7 @@ def validate_fixture_counts(
 
     zero_count = sum(1 for f in fixtures if f.total == 0)
     if zero_count > 0:
-        deductions += 0.03 * zero_count
+        deductions += 0.01 * zero_count
         score = max(0.0, score - deductions)
 
     return score, results, warnings

@@ -34,6 +34,13 @@ _MAX_CHAR_DY = 3.0
 _BOUNDARY_GAP = 5.0
 # Font-size tolerance multiplier for modal filtering (1.5 = ±50%).
 _FONT_SIZE_TOLERANCE = 1.5
+# Tighter tolerance for short fixture codes (≤2 chars) which are
+# more prone to false positives from annotations at different sizes.
+_SHORT_CODE_FONT_TOLERANCE = 1.15
+# Minimum Euclidean distance (pts) between matches of the same short
+# fixture code.  Matches closer than this are de-duplicated as the
+# same physical fixture (duplicate labels, leader lines, etc.).
+_SHORT_CODE_DEDUP_DIST = 70.0
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +164,19 @@ def _find_char_sequences(
     code_len = len(code_upper)
     matches: list[dict[str, Any]] = []
 
+    # For single-char codes, pre-build a y-binned spatial index for isolation
+    # checks.  Bin chars by row (y rounded to nearest 3pt) for fast neighbor
+    # lookup.  Two-char+ codes don't need isolation — word-boundary checks
+    # are sufficient and isolation would reject valid labels on dense plans.
+    _y_bins: dict[int, list[tuple[int, float, float]]] | None = None
+    if code_len == 1:
+        _y_bins = {}
+        for ci, ch in enumerate(chars):
+            y_bin = int(ch["top"] / 3)
+            entry = (ci, ch["x0"], ch["x1"])
+            for yb in (y_bin - 1, y_bin, y_bin + 1):
+                _y_bins.setdefault(yb, []).append(entry)
+
     for i in range(len(chars) - code_len + 1):
         # --- 1. Check spelling ---
         valid = True
@@ -200,7 +220,36 @@ def _find_char_sequences(
                     and next_c["text"].isalnum()):
                 continue
 
-        # --- 4. Position / exclusion filtering ---
+        # --- 4. Isolation check for single-char codes ---
+        # Single-char fixture codes (e.g., "A", "B") appear everywhere in
+        # engineering text.  True fixture labels are spatially isolated —
+        # no other character within ~15 pts horizontally on the same line.
+        # For multi-char codes the word-boundary checks suffice; applying
+        # isolation to them causes false rejections on dense plans.
+        if code_len == 1 and _y_bins is not None:
+            _ISO_GAP = 15.0
+            first_c = chars[i]
+            last_c = chars[i + code_len - 1]
+            match_x0 = first_c["x0"]
+            match_x1 = last_c["x1"]
+            match_y = first_c["top"]
+            y_bin = int(match_y / 3)
+            isolated = True
+            # Check nearby chars via spatial index
+            match_indices = set(range(i, i + code_len))
+            for yb in (y_bin - 1, y_bin, y_bin + 1):
+                for ci, cx0, cx1 in _y_bins.get(yb, []):
+                    if ci in match_indices:
+                        continue
+                    if cx1 > match_x0 - _ISO_GAP and cx0 < match_x1 + _ISO_GAP:
+                        isolated = False
+                        break
+                if not isolated:
+                    break
+            if not isolated:
+                continue
+
+        # --- 5. Position / exclusion filtering ---
         first = chars[i]
         last = chars[i + code_len - 1]
         cx = (first["x0"] + last["x1"]) / 2
@@ -256,17 +305,64 @@ def _apply_font_size_filter(
 
     filtered: dict[str, list[dict[str, Any]]] = {}
     for code, matches in all_matches.items():
-        kept = [m for m in matches if lo <= round(m["font_size"] * 2) / 2 <= hi]
+        # Single-char codes get a tighter font tolerance to reject
+        # annotation text at slightly different sizes.  Two-char+ codes
+        # keep the normal tolerance since they're less ambiguous.
+        if len(code) == 1:
+            code_lo = modal_size / _SHORT_CODE_FONT_TOLERANCE
+            code_hi = modal_size * _SHORT_CODE_FONT_TOLERANCE
+        else:
+            code_lo, code_hi = lo, hi
+
+        kept = [m for m in matches if code_lo <= round(m["font_size"] * 2) / 2 <= code_hi]
         removed = len(matches) - len(kept)
         if removed:
             logger.debug(
                 "Font-size filter removed %d/%d matches for %s "
                 "(modal=%.1f, range=%.1f–%.1f)",
-                removed, len(matches), code, modal_size, lo, hi,
+                removed, len(matches), code, modal_size, code_lo, code_hi,
             )
         filtered[code] = kept
 
     return filtered
+
+
+# ---------------------------------------------------------------------------
+# Spatial de-duplication for short codes
+# ---------------------------------------------------------------------------
+
+def _deduplicate_nearby_matches(
+    matches: list[dict[str, Any]],
+    min_distance: float = _SHORT_CODE_DEDUP_DIST,
+) -> list[dict[str, Any]]:
+    """Merge matches of the same fixture code that are spatially close.
+
+    On some drawings the same fixture label appears twice near a single
+    fixture symbol (e.g., one inside the symbol and one on a leader line).
+    This creates duplicate counts for the same physical fixture.
+
+    Uses greedy clustering: sort by position, mark every match within
+    *min_distance* of an already-kept match as a duplicate.
+    """
+    if len(matches) <= 1:
+        return matches
+
+    # Sort by y then x for stable ordering.
+    ordered = sorted(matches, key=lambda m: (m["cy"], m["cx"]))
+    kept: list[dict[str, Any]] = []
+
+    for m in ordered:
+        is_dup = False
+        for k in kept:
+            dist = ((m["cx"] - k["cx"]) ** 2
+                    + (m["cy"] - k["cy"]) ** 2) ** 0.5
+            if dist < min_distance:
+                is_dup = True
+                break
+        if not is_dup:
+            kept.append(m)
+
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +500,20 @@ def count_fixtures_on_plan(
 
     # --- Step 2: modal font-size filtering ---
     all_matches = _apply_font_size_filter(all_matches)
+
+    # --- Step 2.5: spatial de-duplication for single-char codes ---
+    # Single-char fixture codes (e.g. "A") can appear twice near the same
+    # fixture symbol.  Merge matches within _SHORT_CODE_DEDUP_DIST.
+    for code in fixture_codes:
+        if len(code) == 1 and len(all_matches.get(code, [])) > 1:
+            before = len(all_matches[code])
+            all_matches[code] = _deduplicate_nearby_matches(all_matches[code])
+            removed = before - len(all_matches[code])
+            if removed:
+                logger.debug(
+                    "De-dup removed %d/%d matches for %s on %s",
+                    removed, before, code, sheet,
+                )
 
     # --- Step 3: cross-reference filtering for sheet-code fixtures ---
     sheet_code_set = {c.upper() for c in (plan_sheet_codes or [])}
