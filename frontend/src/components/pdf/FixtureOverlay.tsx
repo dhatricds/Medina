@@ -1,3 +1,4 @@
+import { useCallback } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 
 interface Props {
@@ -6,14 +7,28 @@ interface Props {
 }
 
 export default function FixtureOverlay({ renderedWidth, renderedHeight }: Props) {
-  const { highlight, clearHighlight, toggleMarker } = useProjectStore();
-  const { fixtureCode, keynoteNumber, positions, pageWidth, pageHeight, loading, rejectedIndices } = highlight;
+  const { highlight, clearHighlight, toggleMarker, addMarkerAtPosition, removeAddedMarker } = useProjectStore();
+  const { fixtureCode, keynoteNumber, positions, pageWidth, pageHeight, loading, rejectedIndices, addedPositions, addMode } = highlight;
 
   const hasTarget = fixtureCode || keynoteNumber;
   if (!hasTarget) return null;
 
-  const label = fixtureCode ?? `#${keynoteNumber}`;
   const isKeynote = !!keynoteNumber;
+
+  // Handle background click: add marker in add mode, dismiss otherwise
+  const handleBackgroundClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget) return;
+    if (addMode && pageWidth && pageHeight && renderedWidth && renderedHeight) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const clickY = e.clientY - rect.top;
+      const pdfX = clickX / (renderedWidth / pageWidth);
+      const pdfY = clickY / (renderedHeight / pageHeight);
+      addMarkerAtPosition(pdfX, pdfY);
+    } else {
+      clearHighlight();
+    }
+  }, [addMode, pageWidth, pageHeight, renderedWidth, renderedHeight, addMarkerAtPosition, clearHighlight]);
 
   // Loading state
   if (loading) {
@@ -23,23 +38,19 @@ export default function FixtureOverlay({ renderedWidth, renderedHeight }: Props)
         style={{ pointerEvents: 'none' }}
       >
         <div className="bg-black/60 text-white px-3 py-1.5 rounded text-xs animate-pulse">
-          Locating {label}...
+          Locating {fixtureCode ?? `#${keynoteNumber}`}...
         </div>
       </div>
     );
   }
 
-  // No positions available (VLM-counted or old project)
-  if (positions.length === 0 && !loading) {
+  // No positions — just a click-to-dismiss overlay (controls shown in PdfViewer's sticky bar)
+  if (positions.length === 0 && addedPositions.length === 0 && !loading) {
     return (
       <div
         className="absolute inset-0 z-20 cursor-pointer"
         onClick={clearHighlight}
-      >
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-amber-600/90 text-white px-3 py-1.5 rounded text-xs shadow-lg">
-          Positions not available for {label} (AI vision counted)
-        </div>
-      </div>
+      />
     );
   }
 
@@ -48,27 +59,13 @@ export default function FixtureOverlay({ renderedWidth, renderedHeight }: Props)
   const scaleX = renderedWidth / pageWidth;
   const scaleY = renderedHeight / pageHeight;
 
-  const acceptedCount = positions.length - rejectedIndices.size;
-
   return (
     <div
       className="absolute inset-0 z-20"
-      onClick={(e) => {
-        // Only dismiss when clicking the background, not a marker
-        if (e.target === e.currentTarget) clearHighlight();
-      }}
+      onClick={handleBackgroundClick}
+      style={{ cursor: addMode ? 'crosshair' : 'default' }}
     >
-      {/* Count badge */}
-      <div className={`absolute top-3 left-1/2 -translate-x-1/2 ${isKeynote ? 'bg-amber-500' : 'bg-red-600'} text-white px-3 py-1 rounded-full text-xs font-semibold shadow-lg z-30 pointer-events-none select-none`}>
-        {label}: {acceptedCount}/{positions.length} accepted
-      </div>
-
-      {/* Hint */}
-      <div className="absolute top-10 left-1/2 -translate-x-1/2 bg-black/50 text-white/80 px-2 py-0.5 rounded text-[10px] z-30 pointer-events-none select-none whitespace-nowrap">
-        Click marker to reject/accept &middot; Click background to dismiss
-      </div>
-
-      {/* Position markers */}
+      {/* Pipeline-detected position markers */}
       {positions.map((pos, i) => {
         const left = pos.x0 * scaleX;
         const top = pos.top * scaleY;
@@ -86,7 +83,7 @@ export default function FixtureOverlay({ renderedWidth, renderedHeight }: Props)
 
         return (
           <div
-            key={i}
+            key={`p-${i}`}
             className={`absolute border-2 ${borderColor} ${bgColor} rounded-sm cursor-pointer transition-all duration-150 ${rejected ? 'opacity-50' : 'animate-pulse hover:ring-2 hover:ring-white/60'}`}
             style={{
               left: left - pad,
@@ -100,7 +97,6 @@ export default function FixtureOverlay({ renderedWidth, renderedHeight }: Props)
             }}
             title={rejected ? 'Click to re-accept this marker' : 'Click to reject this marker'}
           >
-            {/* X mark for rejected markers */}
             {rejected && (
               <svg
                 className="absolute inset-0 w-full h-full text-red-500/70 pointer-events-none"
@@ -113,6 +109,45 @@ export default function FixtureOverlay({ renderedWidth, renderedHeight }: Props)
                 <line x1="20" y1="4" x2="4" y2="20" />
               </svg>
             )}
+          </div>
+        );
+      })}
+
+      {/* User-added markers (green) */}
+      {addedPositions.map((pos, i) => {
+        const left = pos.x0 * scaleX;
+        const top = pos.top * scaleY;
+        const width = (pos.x1 - pos.x0) * scaleX;
+        const height = (pos.bottom - pos.top) * scaleY;
+        const pad = Math.max(4, Math.min(width, height) * 0.5);
+
+        return (
+          <div
+            key={`a-${i}`}
+            className="absolute border-2 border-green-500 bg-green-500/25 rounded-sm cursor-pointer animate-pulse hover:ring-2 hover:ring-white/60"
+            style={{
+              left: left - pad,
+              top: top - pad,
+              width: width + pad * 2,
+              height: height + pad * 2,
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+              removeAddedMarker(i);
+            }}
+            title="User-added marker (click to remove)"
+          >
+            {/* + icon */}
+            <svg
+              className="absolute inset-0 w-full h-full text-green-600/70 pointer-events-none"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={3}
+            >
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
           </div>
         );
       })}

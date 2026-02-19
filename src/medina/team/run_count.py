@@ -22,7 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger("medina.team.count")
 
 
-def run(source: str, work_dir: str, use_vision: bool = False) -> dict:
+def run(source: str, work_dir: str, use_vision: bool = False, hints=None) -> dict:
     """Run stage 5a: FIXTURE COUNTING per plan page."""
     from medina.pdf.loader import load
     from medina.pdf.classifier import classify_pages
@@ -71,10 +71,19 @@ def run(source: str, work_dir: str, use_vision: bool = False) -> dict:
     # --- Text-based counting ---
     all_plan_counts: dict[str, dict[str, int]] = {}
     all_plan_positions: dict[str, dict] = {}
+    # Extract rejected/added positions from user feedback hints
+    rejected_pos = hints.rejected_positions if hints is not None else None
+    added_pos = hints.added_positions if hints is not None else None
+    if rejected_pos:
+        logger.info("[COUNT] User rejected positions for %d fixture codes", len(rejected_pos))
+    if added_pos:
+        logger.info("[COUNT] User added positions for %d fixture codes", len(added_pos))
     if plan_pages and fixture_codes:
         counts_result = count_all_plans(
             plan_pages, pdf_pages, fixture_codes, plan_sheet_codes=plan_codes,
             return_positions=True,
+            all_rejected_positions=rejected_pos,
+            all_added_positions=added_pos,
         )
         if isinstance(counts_result, tuple):
             all_plan_counts, all_plan_positions = counts_result
@@ -164,6 +173,19 @@ def run(source: str, work_dir: str, use_vision: bool = False) -> dict:
 
         except Exception as e:
             logger.warning("[COUNT] Vision counting failed: %s", e)
+
+    # --- Apply user count overrides ---
+    if hints is not None and hints.count_overrides:
+        for code, plan_overrides in hints.count_overrides.items():
+            for plan_code, override_count in plan_overrides.items():
+                old = all_plan_counts.get(plan_code, {}).get(code, 0)
+                if plan_code not in all_plan_counts:
+                    all_plan_counts[plan_code] = {}
+                all_plan_counts[plan_code][code] = override_count
+                logger.info(
+                    "[COUNT] User override: %s on %s: %d -> %d",
+                    code, plan_code, old, override_count,
+                )
 
     # --- Save results ---
     result = {

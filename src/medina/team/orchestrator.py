@@ -65,9 +65,29 @@ def run_team(
 
     t0 = time.time()
 
+    # --- Load learnings from past corrections for this source ---
+    hints = None
+    try:
+        from medina.api.learnings import derive_learned_hints
+        hints = derive_learned_hints(source_path)
+        if hints:
+            logger.info(
+                "Loaded learnings: %d extra fixtures, %d removed, "
+                "%d rejected positions, %d added positions",
+                len(hints.extra_fixtures),
+                len(hints.removed_codes),
+                len(hints.rejected_positions),
+                len(hints.added_positions),
+            )
+    except Exception as e:
+        logger.warning("Failed to load learnings: %s", e)
+
     print("=" * 60)
     print("  EXPERT ELECTRICAL CONTRACTOR TEAM")
     print(f"  Project: {source_path.name}")
+    if hints:
+        print(f"  Learnings: {len(hints.extra_fixtures)} extra fixtures, "
+              f"{len(hints.removed_codes)} removed codes")
     print("=" * 60)
 
     # --- Agent 1: Search (The Page Navigator) ---
@@ -84,7 +104,7 @@ def run_team(
     # --- Agent 2: Schedule (The Schedule Reader) ---
     print("\n[2/5] SCHEDULE AGENT: Reading luminaire schedule tables...")
     t2 = time.time()
-    schedule_result = run_schedule(source, work_dir)
+    schedule_result = run_schedule(source, work_dir, hints=hints)
     t_schedule = time.time() - t2
     print(f"      Completed in {t_schedule:.1f}s")
     print(
@@ -101,7 +121,7 @@ def run_team(
     keynote_result = None
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        count_future = executor.submit(run_count, source, work_dir, use_vision)
+        count_future = executor.submit(run_count, source, work_dir, use_vision, hints)
         keynote_future = executor.submit(run_keynote, source, work_dir)
 
         for future in as_completed([count_future, keynote_future]):

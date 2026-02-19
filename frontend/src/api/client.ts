@@ -1,4 +1,4 @@
-import type { ProjectData, Correction, DashboardProject, FixturePosition } from '../types';
+import type { ProjectData, Correction, DashboardProject, FixturePosition, FixtureFeedback } from '../types';
 
 const BASE = import.meta.env.VITE_API_URL ?? '';
 
@@ -85,6 +85,21 @@ export function getExcelDownloadUrl(projectId: string): string {
   return `${BASE}/api/projects/${projectId}/export/excel`;
 }
 
+/** Download Excel with corrected data via POST (returns blob). */
+export async function downloadCorrectedExcel(
+  projectId: string,
+  fixtures: unknown[],
+  keynotes: unknown[],
+): Promise<Blob> {
+  const res = await fetch(`${BASE}/api/projects/${projectId}/export/excel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fixtures, keynotes }),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.blob();
+}
+
 // --- Corrections ---
 
 export function saveCorrections(
@@ -106,8 +121,11 @@ export function listDashboardProjects(): Promise<DashboardProject[]> {
   return fetchJson('/api/dashboard');
 }
 
-export function approveProject(projectId: string): Promise<DashboardProject> {
-  return postJson(`/api/dashboard/approve/${projectId}`);
+export function approveProject(
+  projectId: string,
+  body?: { corrected_fixtures?: unknown[]; corrected_keynotes?: unknown[] },
+): Promise<DashboardProject> {
+  return postJson(`/api/dashboard/approve/${projectId}`, body);
 }
 
 export function getDashboardProject(id: string): Promise<ProjectData> {
@@ -137,6 +155,38 @@ export interface PagePositionsResponse {
 
 export function getPagePositions(projectId: string, pageNumber: number): Promise<PagePositionsResponse> {
   return fetchJson(`/api/projects/${projectId}/page/${pageNumber}/positions`);
+}
+
+// --- Feedback ---
+
+export function submitFeedback(
+  projectId: string,
+  correction: FixtureFeedback,
+): Promise<{ project_id: string; correction_count: number; corrections: FixtureFeedback[] }> {
+  return postJson(`/api/projects/${projectId}/feedback`, correction);
+}
+
+export function getFeedback(
+  projectId: string,
+): Promise<{ project_id: string; correction_count: number; corrections: FixtureFeedback[] }> {
+  return fetchJson(`/api/projects/${projectId}/feedback`);
+}
+
+export async function removeFeedback(
+  projectId: string,
+  index: number,
+): Promise<{ project_id: string; removed: FixtureFeedback; correction_count: number }> {
+  const res = await fetch(`${BASE}/api/projects/${projectId}/feedback/${index}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+export function reprocessProject(
+  projectId: string,
+): Promise<{ project_id: string; status: string }> {
+  return postJson(`/api/projects/${projectId}/reprocess`);
 }
 
 // --- SSE URL ---

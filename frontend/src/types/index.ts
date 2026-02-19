@@ -84,6 +84,25 @@ export interface Correction {
   corrected: number;
 }
 
+export type CorrectionReason =
+  | 'missed_embedded_schedule'
+  | 'wrong_fixture_code'
+  | 'extra_fixture'
+  | 'missing_fixture'
+  | 'vlm_misread'
+  | 'wrong_bounding_box'
+  | 'manual_count_edit'
+  | 'other';
+
+export interface FixtureFeedback {
+  action: 'add' | 'remove' | 'update_spec' | 'count_override';
+  fixture_code: string;
+  reason: CorrectionReason;
+  reason_detail: string;
+  fixture_data?: Record<string, string | number>;
+  spec_patches?: Record<string, string>;
+}
+
 export interface DashboardProject {
   id: string;
   name: string;
@@ -115,6 +134,12 @@ export interface HighlightState {
   loading: boolean;
   /** Indices of positions the user flagged as incorrectly counted. */
   rejectedIndices: Set<number>;
+  /** Plans where this item has count > 0 (for prev/next navigation). */
+  availablePlans: string[];
+  /** User-added marker positions (missed by pipeline). */
+  addedPositions: FixturePosition[];
+  /** Whether click-to-add mode is active. */
+  addMode: boolean;
 }
 
 export type ViewMode = 'workspace' | 'dashboard' | 'dashboard_detail';

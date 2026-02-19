@@ -5,9 +5,11 @@ export default function TopBar() {
     view, setView, projectData, appState, downloadExcel,
     uploadAndProcess, reset, loadSources, loadDashboard,
     approveCurrentProject, projectId, approvedProjectIds,
+    feedbackCount, reprocessWithFeedback, getCorrectionSummary,
   } = useProjectStore();
 
   const isApproved = projectId ? approvedProjectIds.has(projectId) : false;
+  const correctionSummary = appState === 'complete' ? getCorrectionSummary() : null;
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -77,15 +79,27 @@ export default function TopBar() {
               Approved
             </div>
           ) : (
-            <button
-              className="px-4 py-2 rounded-md text-[13px] font-semibold flex items-center gap-1.5 bg-success text-white hover:bg-green-600 transition-all cursor-pointer"
-              onClick={approveCurrentProject}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-              Approve
-            </button>
+            <>
+              {correctionSummary && correctionSummary.needsRerun && (
+                <div className="px-3 py-1.5 rounded-md text-[11px] font-medium bg-yellow-500/20 text-yellow-200 border border-yellow-500/30">
+                  Schedule changes — consider Re-run All
+                </div>
+              )}
+              <button
+                className="px-4 py-2 rounded-md text-[13px] font-semibold flex items-center gap-1.5 bg-success text-white hover:bg-green-600 transition-all cursor-pointer"
+                onClick={approveCurrentProject}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+                Approve
+                {correctionSummary && correctionSummary.totalDiffs > 0 && (
+                  <span className="bg-white/20 text-[10px] px-1.5 py-px rounded-full ml-0.5">
+                    {correctionSummary.totalDiffs}
+                  </span>
+                )}
+              </button>
+            </>
           )
         )}
 
@@ -116,13 +130,25 @@ export default function TopBar() {
             </button>
             <input type="file" id="fileInput" accept=".pdf" className="hidden" onChange={handleFileChange} />
             <button
-              className="px-4 py-2 rounded-md text-[13px] font-semibold flex items-center gap-1.5 bg-white/10 text-white border border-white/20 hover:bg-white/20 transition-all cursor-pointer"
+              className={`px-4 py-2 rounded-md text-[13px] font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                feedbackCount > 0 && appState === 'complete'
+                  ? 'bg-blue-500 text-white hover:bg-blue-600 ring-2 ring-blue-300 ring-offset-1 animate-pulse'
+                  : 'bg-white/10 text-white border border-white/20 hover:bg-white/20'
+              } disabled:opacity-50 disabled:cursor-not-allowed disabled:animate-none`}
+              onClick={reprocessWithFeedback}
+              disabled={appState !== 'complete' || feedbackCount === 0}
+              title={feedbackCount > 0 ? `Re-run pipeline with ${feedbackCount} correction${feedbackCount > 1 ? 's' : ''}` : 'No corrections to apply'}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <polyline points="23 4 23 10 17 10" />
                 <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
               </svg>
               Re-run All
+              {feedbackCount > 0 && (
+                <span className="bg-white/20 text-[10px] px-1.5 py-px rounded-full ml-0.5">
+                  {feedbackCount}
+                </span>
+              )}
             </button>
             <button
               className="px-4 py-2 rounded-md text-[13px] font-semibold flex items-center gap-1.5 bg-success text-white hover:bg-green-600 transition-all cursor-pointer disabled:opacity-50"

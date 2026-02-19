@@ -46,9 +46,9 @@ export default function App() {
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-bg text-text-main">
       <TopBar />
+      <AgentPipeline />
       <ThreePanel
         left={showPdfViewer ? <PdfViewer /> : <UploadZone />}
-        center={<AgentPipeline />}
         right={<TabContainer />}
       />
       <BottomBar />

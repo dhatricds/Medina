@@ -368,7 +368,9 @@ Medina/
 │       │   ├── models.py        # Request/response Pydantic schemas
 │       │   ├── projects.py      # In-memory ProjectState store
 │       │   ├── seed.py          # Parse training xlsx → seed dashboard on startup
-│       │   ├── orchestrator_wrapper.py  # Wraps agent runs with SSE events
+│       │   ├── orchestrator_wrapper.py  # Wraps agent runs with SSE events + learning
+│       │   ├── feedback.py      # Feedback models, persistence, hint derivation
+│       │   ├── learnings.py     # Global learning store (persistent cross-session)
 │       │   └── routes/
 │       │       ├── sources.py   # GET /api/sources (list data/ folder)
 │       │       ├── upload.py    # POST /api/upload (single/multi-file)
@@ -377,6 +379,7 @@ Medina/
 │       │       ├── pages.py     # GET /api/projects/{id}/page/{n} (PNG)
 │       │       ├── export.py    # GET /api/projects/{id}/export/excel
 │       │       ├── corrections.py # PATCH /api/projects/{id}/corrections
+│       │       ├── feedback.py  # POST/GET/DELETE feedback, POST reprocess
 │       │       ├── demo.py      # GET /api/demo/{name}
 │       │       └── dashboard.py # Dashboard CRUD: list, approve, detail, export, delete
 │       └── team/                # Expert Contractor Agent Team
@@ -398,7 +401,9 @@ Medina/
 ├── train/                       # Training xlsx files (5 ground truth inventories)
 ├── notebooks/                   # Jupyter exploration notebooks
 └── output/                      # Generated results (gitignored)
-    └── dashboard/               # Dashboard JSON + xlsx storage (auto-seeded)
+    ├── dashboard/               # Dashboard JSON + xlsx storage (auto-seeded)
+    ├── feedback/                # Per-project feedback corrections (temporary)
+    └── learnings/               # Global persistent learning store (per source file)
 ```
 
 ## Expert Contractor Agent Team Architecture
@@ -1006,6 +1011,8 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 6. **Cross-reference filtering for sheet-code fixtures**: When a fixture code matches a plan sheet code (e.g., E1A), per-word matching checks preceding words for cross-reference indicators. Concatenated-text matching is disabled for these codes since context can't be checked in a flat string.
 7. **Folder dedup by title-block sheet code**: Filename-based sheet codes are unreliable for addenda (e.g., `ADDM1` gets parsed as the code). The loader always reads the title-block sheet code and deduplicates by it, keeping the last file (highest sort order = latest revision).
 8. **Smart agent skipping**: The API orchestrator wrapper skips count and keynote agents when there's nothing to process. If no lighting plans found → skip both. If plans exist but no fixture codes → skip count, still run keynotes. Empty result JSON files are written so the QA agent can still read them.
+9. **Global learning store over per-project feedback**: User corrections are promoted to a persistent learning store (`output/learnings/`) indexed by source file identity. On every pipeline run (fresh or reprocess), learnings are auto-loaded and merged with any explicit feedback. This ensures corrections made once are never forgotten across sessions or projects using the same source.
+10. **`is_reprocess` flag vs `hints` check for search caching**: Since hints can come from learnings on fresh runs (not just reprocessing), the search-cache skip uses a dedicated `is_reprocess` flag rather than checking `hints is not None`. This prevents skipping the search agent on first-ever runs that happen to have learnings.
 
 ## Known Challenges
 
@@ -1137,3 +1144,64 @@ The app opens to a **Dashboard** view showing all approved projects as a card gr
 **Storage:** `output/dashboard/` directory with `index.json` (project list) + per-project JSON and xlsx files.
 
 **Seed:** On first startup, `seed.py` parses 5 training xlsx files from `train/` using openpyxl and writes to `output/dashboard/`. Skips if `index.json` already exists. To re-seed, delete `output/dashboard/` and restart.
+
+### Human-in-the-Loop Learning System
+
+The system supports user corrections that persist across sessions and are automatically applied to future pipeline runs. This implements a feedback → learn → apply cycle.
+
+**Architecture:**
+```
+User corrects fixture table (UI)
+    │
+    ├─ Count offset → marker toggle (click fixture dot on PDF)
+    ├─ Add missing fixture type → AddFixtureModal
+    ├─ Remove wrong fixture → trash icon + ReasonModal
+    │
+    └─ All corrections saved to output/feedback/{project_id}.json
+        │
+        └─ "Re-run All" button
+                │
+                ├─ Skip Search (cached, is_reprocess=True)
+                ├─ Re-run Schedule with hints (add/remove fixtures)
+                ├─ Re-run Count + Keynote (new code list + position overrides)
+                └─ Re-run QA + Output
+                        │
+                        └─ On success: promote corrections to output/learnings/{source_key}.json
+                           and clear project feedback
+```
+
+**Global Learning Store (`src/medina/api/learnings.py`):**
+- Corrections are indexed by source file identity (filename + path hash)
+- On EVERY pipeline run (both fresh and reprocess), learnings are auto-loaded via `derive_learned_hints()`
+- Learnings are merged with explicit feedback hints (feedback overrides learnings for conflicts)
+- Storage: `output/learnings/{source_key}.json` — persists across server restarts
+
+**Feedback Models (`src/medina/api/feedback.py`):**
+- `FixtureFeedback`: action (add/remove/update_count/reject_position/add_position), fixture_code, reason, fixture_data
+- `ProjectFeedback`: per-project correction list with timestamps
+- `FeedbackHints`: derived hints passed to pipeline agents — `extra_fixtures`, `removed_codes`, `count_overrides`, `spec_patches`, `rejected_positions`, `added_positions`
+
+**Hint Application Points:**
+| Agent | Hint Type | Effect |
+|-------|-----------|--------|
+| Schedule Agent | `extra_fixtures` | Appends user-added fixture codes with specs |
+| Schedule Agent | `removed_codes` | Filters out user-rejected fixture codes |
+| Schedule Agent | `spec_patches` | Updates fixture spec fields (description, voltage, etc.) |
+| Count Agent | `count_overrides` | Replaces text-counted values with user-provided counts |
+| Count Agent | `rejected_positions` | Excludes specific marker positions from counting |
+| Count Agent | `added_positions` | Includes user-added marker positions in counting |
+
+**Feedback API Endpoints:**
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/projects/{id}/feedback` | POST | Submit a correction |
+| `/api/projects/{id}/feedback` | GET | Get all feedback for project |
+| `/api/projects/{id}/feedback/{index}` | DELETE | Remove a correction |
+| `/api/projects/{id}/reprocess` | POST | Re-run pipeline with accumulated feedback |
+
+**Learning Lifecycle:**
+1. User processes a PDF → corrections saved to `output/feedback/{project_id}.json`
+2. User clicks "Re-run All" → feedback loaded, derived as hints, pipeline re-runs
+3. On successful reprocessing → corrections promoted to `output/learnings/{source_key}.json`, project feedback cleared
+4. Next time same source is processed (any project) → learnings auto-loaded and applied as hints
+5. New corrections can further refine the learnings (merged, last correction wins)

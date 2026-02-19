@@ -11,6 +11,7 @@ from medina.api.routes import (
     dashboard,
     demo,
     export,
+    feedback,
     pages,
     positions,
     processing,
@@ -56,6 +57,7 @@ app.include_router(corrections.router)
 app.include_router(positions.router)
 app.include_router(demo.router)
 app.include_router(dashboard.router)
+app.include_router(feedback.router)
 
 
 @app.on_event("startup")

@@ -14,7 +14,7 @@ const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.25;
 
 export default function PdfViewer() {
-  const { projectData, projectId, currentPage, totalPages, setCurrentPage, appState, highlight, clearHighlight } = useProjectStore();
+  const { projectData, projectId, currentPage, totalPages, setCurrentPage, appState, highlight, clearHighlight, navigateHighlight, toggleAddMode } = useProjectStore();
   const [zoom, setZoom] = useState(1);
   const [pdfError, setPdfError] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -68,14 +68,23 @@ export default function PdfViewer() {
     }
   }, [currentPage, totalPages, setCurrentPage, clearHighlight]);
 
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    if (e.ctrlKey || e.metaKey) {
-      e.preventDefault();
-      setZoom(z => {
-        const delta = e.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP;
-        return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z + delta));
-      });
-    }
+  // Native wheel listener — passive:false only for Ctrl+scroll zoom,
+  // regular scrolling stays fully native (no jank or blocking)
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        setZoom(z => {
+          const delta = e.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP;
+          return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z + delta));
+        });
+      }
+      // else: browser handles scroll natively
+    };
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
   }, []);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -151,7 +160,7 @@ export default function PdfViewer() {
   );
 
   return (
-    <div className="flex-1 flex flex-col">
+    <div className="flex-1 flex flex-col min-h-0">
       <div className="px-3 py-2 bg-pdf-toolbar flex items-center justify-between border-b border-white/10">
         <span className="text-slate-400 text-xs truncate mr-2">
           {totalPages > 0
@@ -213,8 +222,7 @@ export default function PdfViewer() {
 
       <div
         ref={measuredRef}
-        className="flex-1 overflow-auto p-4"
-        onWheel={handleWheel}
+        className="flex-1 overflow-auto p-4 min-h-0"
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
@@ -224,10 +232,80 @@ export default function PdfViewer() {
           userSelect: isDragging ? 'none' : 'auto',
         }}
       >
-        <div
-          className="flex items-center justify-center"
-          style={{ minHeight: '100%', minWidth: '100%' }}
-        >
+        {/* Floating highlight controls — sticky so they stay visible when scrolling zoomed plan */}
+        {(() => {
+          const hasTarget = highlight.fixtureCode || highlight.keynoteNumber;
+          if (!hasTarget || highlight.loading) return null;
+          const label = highlight.fixtureCode ?? `#${highlight.keynoteNumber}`;
+          const isKeynote = !!highlight.keynoteNumber;
+          const acceptedPipeline = highlight.positions.length - highlight.rejectedIndices.size;
+          const totalCount = acceptedPipeline + highlight.addedPositions.length;
+          const hasMultiplePlans = highlight.availablePlans.length > 1;
+          const currentPlanIdx = highlight.availablePlans.indexOf(highlight.targetSheetCode ?? '');
+          const planLabel = highlight.targetSheetCode ? `${currentPlanIdx + 1}/${highlight.availablePlans.length} ${highlight.targetSheetCode}` : '';
+          const noPositions = highlight.positions.length === 0 && highlight.addedPositions.length === 0;
+
+          return (
+            <div className="sticky top-0 z-40 flex flex-col items-center gap-1 py-2">
+              {/* Count badge */}
+              <div className={`${isKeynote ? 'bg-amber-500' : 'bg-red-600'} text-white px-3 py-1 rounded-full text-xs font-semibold shadow-lg select-none`}>
+                {noPositions
+                  ? `${label}: positions not available (AI vision counted)`
+                  : `${label}: ${totalCount} total (${acceptedPipeline} detected${highlight.addedPositions.length > 0 ? ` + ${highlight.addedPositions.length} added` : ''})`
+                }
+              </div>
+
+              {/* Hint */}
+              {!noPositions && (
+                <div className="bg-black/50 text-white/80 px-2 py-0.5 rounded text-[10px] select-none whitespace-nowrap">
+                  {highlight.addMode
+                    ? 'Click on the plan where the fixture is missing'
+                    : 'Click marker to reject/accept \u00B7 Click background to dismiss'}
+                </div>
+              )}
+
+              {/* Plan navigation + Add missed button */}
+              <div className="flex items-center gap-2">
+                {hasMultiplePlans && (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      className="bg-white/90 hover:bg-white text-slate-700 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shadow cursor-pointer border border-slate-300"
+                      onClick={() => navigateHighlight('prev')}
+                      title="Previous plan"
+                    >&#9664;</button>
+                    <span className="bg-black/60 text-white px-2 py-0.5 rounded text-[10px] font-medium select-none whitespace-nowrap">
+                      {planLabel}
+                    </span>
+                    <button
+                      className="bg-white/90 hover:bg-white text-slate-700 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shadow cursor-pointer border border-slate-300"
+                      onClick={() => navigateHighlight('next')}
+                      title="Next plan"
+                    >&#9654;</button>
+                  </div>
+                )}
+                {!noPositions && (
+                  <button
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium shadow cursor-pointer border transition-all ${
+                      highlight.addMode
+                        ? 'bg-green-500 text-white border-green-600 ring-2 ring-green-300'
+                        : 'bg-white/90 hover:bg-green-50 text-slate-700 border-slate-300 hover:border-green-400'
+                    }`}
+                    onClick={() => toggleAddMode()}
+                    title={highlight.addMode ? 'Cancel adding marker' : 'Click to add a missed fixture location'}
+                  >
+                    <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3">
+                      <path d="M8 1a.5.5 0 0 1 .5.5V7h5.5a.5.5 0 0 1 0 1H8.5v5.5a.5.5 0 0 1-1 0V8H2a.5.5 0 0 1 0-1h5.5V1.5A.5.5 0 0 1 8 1z" />
+                    </svg>
+                    {highlight.addMode ? 'Click on plan...' : 'Add missed'}
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* margin:0 auto centers horizontally; width:fit-content lets it grow with zoom */}
+        <div style={{ margin: '0 auto', width: 'fit-content' }}>
           {pagePdfUrl && !pdfError ? (
             <Document
               key={`${projectId}-${currentPage}`}

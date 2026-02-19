@@ -45,3 +45,8 @@ class SourceItem(BaseModel):
 
 class FromSourceRequest(BaseModel):
     source_path: str
+
+
+class ApproveRequest(BaseModel):
+    corrected_fixtures: list[dict] | None = None
+    corrected_keynotes: list[dict] | None = None

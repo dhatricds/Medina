@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ProjectData, AgentInfo, AppState, Correction, DashboardProject, ViewMode, HighlightState, FixturePosition } from '../types';
+import type { ProjectData, AgentInfo, AppState, Correction, DashboardProject, ViewMode, HighlightState, FixturePosition, FixtureFeedback } from '../types';
 import {
   loadDemoData,
   uploadFile,
@@ -9,12 +9,17 @@ import {
   saveCorrections,
   listSources,
   getExcelDownloadUrl,
+  downloadCorrectedExcel,
   listDashboardProjects,
   approveProject,
   getDashboardProject,
   deleteDashboardProject,
   getDashboardExcelUrl,
   getPagePositions,
+  submitFeedback,
+  getFeedback,
+  removeFeedback,
+  reprocessProject,
 } from '../api/client';
 import type { SourceItem } from '../api/client';
 
@@ -27,6 +32,9 @@ const emptyHighlight: HighlightState = {
   pageHeight: 0,
   loading: false,
   rejectedIndices: new Set(),
+  availablePlans: [],
+  addedPositions: [],
+  addMode: false,
 };
 
 /** Derive page count: prefer total_pages from backend, fall back to sheet_index length. */
@@ -89,6 +97,57 @@ function buildDemoAgents(data: ProjectData): AgentInfo[] {
   ];
 }
 
+/** Compare original pipeline output with current (edited) data. */
+function computeCorrectionSummary(
+  original: ProjectData | null,
+  current: ProjectData | null,
+): { countChanges: number; specChanges: number; fixtureAdds: number; fixtureRemoves: number; totalDiffs: number; needsRerun: boolean } {
+  const result = { countChanges: 0, specChanges: 0, fixtureAdds: 0, fixtureRemoves: 0, totalDiffs: 0, needsRerun: false };
+  if (!original || !current) return result;
+
+  const origCodes = new Set(original.fixtures.map((f) => f.code));
+  const currCodes = new Set(current.fixtures.map((f) => f.code));
+
+  // Added fixtures
+  for (const code of currCodes) {
+    if (!origCodes.has(code)) result.fixtureAdds++;
+  }
+  // Removed fixtures
+  for (const code of origCodes) {
+    if (!currCodes.has(code)) result.fixtureRemoves++;
+  }
+
+  // Count and spec diffs for shared fixtures
+  for (const cf of current.fixtures) {
+    const of_ = original.fixtures.find((f) => f.code === cf.code);
+    if (!of_) continue;
+    // Count diffs
+    const allPlans = new Set([...Object.keys(of_.counts_per_plan), ...Object.keys(cf.counts_per_plan)]);
+    for (const p of allPlans) {
+      if ((of_.counts_per_plan[p] ?? 0) !== (cf.counts_per_plan[p] ?? 0)) result.countChanges++;
+    }
+    // Spec diffs
+    const specFields = ['description', 'fixture_style', 'voltage', 'mounting', 'lumens', 'cct', 'dimming', 'max_va'] as const;
+    for (const field of specFields) {
+      if ((of_[field] ?? '') !== (cf[field] ?? '')) result.specChanges++;
+    }
+  }
+
+  // Keynote count diffs
+  for (const ck of current.keynotes) {
+    const ok_ = original.keynotes.find((k) => k.keynote_number === ck.keynote_number);
+    if (!ok_) continue;
+    const allPlans = new Set([...Object.keys(ok_.counts_per_plan), ...Object.keys(ck.counts_per_plan)]);
+    for (const p of allPlans) {
+      if ((ok_.counts_per_plan[p] ?? 0) !== (ck.counts_per_plan[p] ?? 0)) result.countChanges++;
+    }
+  }
+
+  result.totalDiffs = result.countChanges + result.specChanges + result.fixtureAdds + result.fixtureRemoves;
+  result.needsRerun = result.fixtureAdds > 0 || result.fixtureRemoves > 0;
+  return result;
+}
+
 interface ProjectStore {
   // View mode
   view: ViewMode;
@@ -96,6 +155,7 @@ interface ProjectStore {
   // Workspace state
   appState: AppState;
   projectData: ProjectData | null;
+  originalProjectData: ProjectData | null;
   agents: AgentInfo[];
   activeTab: 'lighting' | 'keynotes';
   corrections: Correction[];
@@ -107,8 +167,16 @@ interface ProjectStore {
   sseActive: boolean;
   error: string | null;
 
+  // Feedback state
+  feedbackItems: FixtureFeedback[];
+  feedbackCount: number;
+
   // Highlight state
   highlight: HighlightState;
+  /** Persisted rejected marker indices per "code_plan" key, survives highlight re-entry. */
+  savedRejections: Record<string, number[]>;
+  /** Persisted user-added marker positions per "code_plan" key. */
+  savedAdditions: Record<string, FixturePosition[]>;
 
   // Dashboard state
   dashboardProjects: DashboardProject[];
@@ -132,6 +200,10 @@ interface ProjectStore {
   highlightKeynote: (number: string, targetPlan?: string) => Promise<void>;
   clearHighlight: () => void;
   toggleMarker: (index: number) => void;
+  navigateHighlight: (direction: 'prev' | 'next') => void;
+  toggleAddMode: () => void;
+  addMarkerAtPosition: (pdfX: number, pdfY: number) => void;
+  removeAddedMarker: (index: number) => void;
 
   // Workspace actions
   setAppState: (state: AppState) => void;
@@ -155,6 +227,15 @@ interface ProjectStore {
   downloadExcel: () => void;
   saveEdits: () => Promise<void>;
   reset: () => void;
+
+  // Feedback actions
+  addFixtureFeedback: (item: FixtureFeedback) => Promise<void>;
+  removeFixtureFeedback: (code: string, reason: string, detail: string) => Promise<void>;
+  reprocessWithFeedback: () => Promise<void>;
+  loadFeedback: (projectId: string) => Promise<void>;
+
+  // Correction summary
+  getCorrectionSummary: () => ReturnType<typeof computeCorrectionSummary>;
 }
 
 export const useProjectStore = create<ProjectStore>((set, get) => ({
@@ -164,6 +245,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   // Workspace state
   appState: 'empty',
   projectData: null,
+  originalProjectData: null,
   agents: defaultAgents.map(a => ({ ...a })),
   activeTab: 'lighting',
   corrections: [],
@@ -175,8 +257,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   sseActive: false,
   error: null,
 
+  // Feedback state
+  feedbackItems: [],
+  feedbackCount: 0,
+
   // Highlight state
   highlight: { ...emptyHighlight },
+  savedRejections: {},
+  savedAdditions: {},
 
   // Dashboard state
   dashboardProjects: [],
@@ -198,10 +286,17 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   approveCurrentProject: async () => {
-    const { projectId } = get();
+    const { projectId, projectData, originalProjectData } = get();
     if (!projectId) return;
     try {
-      await approveProject(projectId);
+      // Compare original vs current to detect user corrections
+      const summary = computeCorrectionSummary(originalProjectData, projectData);
+      const body: { corrected_fixtures?: unknown[]; corrected_keynotes?: unknown[] } = {};
+      if (summary.totalDiffs > 0 && projectData) {
+        body.corrected_fixtures = projectData.fixtures;
+        body.corrected_keynotes = projectData.keynotes;
+      }
+      await approveProject(projectId, summary.totalDiffs > 0 ? body : undefined);
       // Refresh dashboard list
       const projects = await listDashboardProjects();
       set((s) => ({
@@ -249,7 +344,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   // Highlight actions
   highlightFixture: async (code: string, targetPlan?: string) => {
-    const { projectId, projectData } = get();
+    const { projectId, projectData, savedRejections, savedAdditions } = get();
     if (!projectId || !projectData) return;
 
     // Find the target plan: explicit or first plan with count > 0
@@ -263,9 +358,19 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     if (!planCode) planCode = projectData.lighting_plans[0];
     if (!planCode) return;
 
+    // Compute plans with counts > 0 for prev/next navigation
+    const availablePlans = fixture
+      ? projectData.lighting_plans.filter((p) => (fixture.counts_per_plan[p] ?? 0) > 0)
+      : [];
+
     // Find page number for this plan
     const pageEntry = projectData.pages?.find((p) => p.sheet_code === planCode);
     if (!pageEntry) return;
+
+    // Restore saved rejections/additions for this code+plan
+    const key = `${code}_${planCode}`;
+    const restoredRejected = new Set(savedRejections[key] ?? []);
+    const restoredAdded = savedAdditions[key] ?? [];
 
     // Navigate to that page
     set({
@@ -278,7 +383,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         pageWidth: 0,
         pageHeight: 0,
         loading: true,
-        rejectedIndices: new Set(),
+        rejectedIndices: restoredRejected,
+        availablePlans,
+        addedPositions: restoredAdded,
+        addMode: false,
       },
     });
 
@@ -295,7 +403,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             pageWidth: resp.page_width ?? 0,
             pageHeight: resp.page_height ?? 0,
             loading: false,
-            rejectedIndices: new Set(),
+            rejectedIndices: restoredRejected,
+            availablePlans,
+            addedPositions: restoredAdded,
+            addMode: false,
           },
         });
       } else {
@@ -308,7 +419,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             pageWidth: 0,
             pageHeight: 0,
             loading: false,
-            rejectedIndices: new Set(),
+            rejectedIndices: restoredRejected,
+            availablePlans,
+            addedPositions: restoredAdded,
+            addMode: false,
           },
         });
       }
@@ -320,23 +434,31 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   highlightKeynote: async (number: string, targetPlan?: string) => {
-    const { projectId, projectData } = get();
+    const { projectId, projectData, savedRejections, savedAdditions } = get();
     if (!projectId || !projectData) return;
 
+    const kn = projectData.keynotes.find((k) => k.keynote_number === number);
     let planCode = targetPlan;
-    if (!planCode) {
-      const kn = projectData.keynotes.find((k) => k.keynote_number === number);
-      if (kn) {
-        planCode = projectData.lighting_plans.find(
-          (p) => (kn.counts_per_plan[p] ?? 0) > 0
-        );
-      }
+    if (!planCode && kn) {
+      planCode = projectData.lighting_plans.find(
+        (p) => (kn.counts_per_plan[p] ?? 0) > 0
+      );
     }
     if (!planCode) planCode = projectData.lighting_plans[0];
     if (!planCode) return;
 
+    // Compute plans with counts > 0 for prev/next navigation
+    const availablePlans = kn
+      ? projectData.lighting_plans.filter((p) => (kn.counts_per_plan[p] ?? 0) > 0)
+      : [];
+
     const pageEntry = projectData.pages?.find((p) => p.sheet_code === planCode);
     if (!pageEntry) return;
+
+    // Restore saved rejections/additions for this keynote+plan
+    const key = `kn${number}_${planCode}`;
+    const restoredRejected = new Set(savedRejections[key] ?? []);
+    const restoredAdded = savedAdditions[key] ?? [];
 
     set({
       currentPage: pageEntry.page_number,
@@ -348,7 +470,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         pageWidth: 0,
         pageHeight: 0,
         loading: true,
-        rejectedIndices: new Set(),
+        rejectedIndices: restoredRejected,
+        availablePlans,
+        addedPositions: restoredAdded,
+        addMode: false,
       },
     });
 
@@ -364,7 +489,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             pageWidth: resp.page_width ?? 0,
             pageHeight: resp.page_height ?? 0,
             loading: false,
-            rejectedIndices: new Set(),
+            rejectedIndices: restoredRejected,
+            availablePlans,
+            addedPositions: restoredAdded,
+            addMode: false,
           },
         });
       } else {
@@ -377,7 +505,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
             pageWidth: 0,
             pageHeight: 0,
             loading: false,
-            rejectedIndices: new Set(),
+            rejectedIndices: restoredRejected,
+            availablePlans,
+            addedPositions: restoredAdded,
+            addMode: false,
           },
         });
       }
@@ -390,8 +521,29 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   clearHighlight: () => set({ highlight: { ...emptyHighlight } }),
 
+  navigateHighlight: (direction: 'prev' | 'next') => {
+    const { highlight, highlightFixture, highlightKeynote } = get();
+    const plans = highlight.availablePlans;
+    if (plans.length <= 1) return;
+
+    const currentIdx = plans.indexOf(highlight.targetSheetCode ?? '');
+    let nextIdx: number;
+    if (direction === 'next') {
+      nextIdx = currentIdx + 1 >= plans.length ? 0 : currentIdx + 1;
+    } else {
+      nextIdx = currentIdx - 1 < 0 ? plans.length - 1 : currentIdx - 1;
+    }
+
+    const nextPlan = plans[nextIdx];
+    if (highlight.fixtureCode) {
+      highlightFixture(highlight.fixtureCode, nextPlan);
+    } else if (highlight.keynoteNumber) {
+      highlightKeynote(highlight.keynoteNumber, nextPlan);
+    }
+  },
+
   toggleMarker: (index: number) => {
-    const { highlight, updateFixtureCount, updateKeynoteCount, addCorrection, projectData } = get();
+    const { highlight, updateFixtureCount, updateKeynoteCount, addCorrection, projectData, projectId, savedRejections } = get();
     if (!highlight.positions.length) return;
 
     const next = new Set(highlight.rejectedIndices);
@@ -401,11 +553,21 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       next.add(index);
     }
 
-    const acceptedCount = highlight.positions.length - next.size;
+    const acceptedCount = highlight.positions.length - next.size + highlight.addedPositions.length;
     set({ highlight: { ...highlight, rejectedIndices: next } });
 
-    // Auto-update the table count
+    // Persist rejections so they survive re-entry
     const plan = highlight.targetSheetCode;
+    const itemKey = highlight.fixtureCode
+      ? `${highlight.fixtureCode}_${plan}`
+      : highlight.keynoteNumber
+        ? `kn${highlight.keynoteNumber}_${plan}`
+        : null;
+    if (itemKey) {
+      set({ savedRejections: { ...savedRejections, [itemKey]: Array.from(next) } });
+    }
+
+    // Auto-update the table count
     if (!plan || !projectData) return;
 
     if (highlight.fixtureCode) {
@@ -420,6 +582,23 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
           original,
           corrected: acceptedCount,
         });
+        // Fire-and-forget: persist feedback with rejected positions so
+        // the count agent learns to skip these locations on reprocess
+        if (projectId) {
+          const rejectedPositions = Array.from(next).map((idx) => {
+            const pos = highlight.positions[idx];
+            return { x0: pos.x0, top: pos.top, x1: pos.x1, bottom: pos.bottom, cx: pos.cx, cy: pos.cy };
+          });
+          submitFeedback(projectId, {
+            action: 'count_override',
+            fixture_code: highlight.fixtureCode,
+            reason: 'wrong_bounding_box',
+            reason_detail: `Marker rejection: ${original} -> ${acceptedCount} on ${plan}`,
+            fixture_data: { sheet: plan, corrected: acceptedCount, original, rejected_positions: rejectedPositions },
+          }).then(() => {
+            set((s) => ({ feedbackCount: s.feedbackCount + 1 }));
+          }).catch(() => {});
+        }
       }
     } else if (highlight.keynoteNumber) {
       const kn = projectData.keynotes.find((k) => k.keynote_number === highlight.keynoteNumber);
@@ -437,6 +616,108 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }
 
     // Recalculate totals after count change
+    get().recalcTotals();
+  },
+
+  toggleAddMode: () => {
+    const { highlight } = get();
+    set({ highlight: { ...highlight, addMode: !highlight.addMode } });
+  },
+
+  addMarkerAtPosition: (pdfX: number, pdfY: number) => {
+    const { highlight, updateFixtureCount, updateKeynoteCount, addCorrection, projectData, projectId, savedAdditions } = get();
+    if (!highlight.addMode) return;
+    const plan = highlight.targetSheetCode;
+    if (!plan || !projectData) return;
+
+    // Create a small marker box around the click point (10pt radius)
+    const r = 10;
+    const newPos = { x0: pdfX - r, top: pdfY - r, x1: pdfX + r, bottom: pdfY + r, cx: pdfX, cy: pdfY };
+    const updatedAdded = [...highlight.addedPositions, newPos];
+
+    // New count = pipeline positions (minus rejected) + user-added
+    const acceptedPipeline = highlight.positions.length - highlight.rejectedIndices.size;
+    const newCount = acceptedPipeline + updatedAdded.length;
+
+    set({ highlight: { ...highlight, addedPositions: updatedAdded, addMode: false } });
+
+    // Persist added positions so they survive re-entry
+    const itemKey = highlight.fixtureCode
+      ? `${highlight.fixtureCode}_${plan}`
+      : highlight.keynoteNumber
+        ? `kn${highlight.keynoteNumber}_${plan}`
+        : null;
+    if (itemKey) {
+      set({ savedAdditions: { ...savedAdditions, [itemKey]: updatedAdded } });
+    }
+
+    // Update the table count
+    if (highlight.fixtureCode) {
+      const fixture = projectData.fixtures.find((f) => f.code === highlight.fixtureCode);
+      const original = fixture?.counts_per_plan[plan] ?? 0;
+      updateFixtureCount(highlight.fixtureCode, plan, newCount);
+      addCorrection({ type: 'lighting', identifier: highlight.fixtureCode, sheet: plan, original, corrected: newCount });
+
+      // Fire-and-forget: save added positions to feedback
+      if (projectId) {
+        const rejectedPositions = Array.from(highlight.rejectedIndices).map((idx) => {
+          const pos = highlight.positions[idx];
+          return { x0: pos.x0, top: pos.top, x1: pos.x1, bottom: pos.bottom, cx: pos.cx, cy: pos.cy };
+        });
+        const addedPositions = updatedAdded.map((p) => ({ x0: p.x0, top: p.top, x1: p.x1, bottom: p.bottom, cx: p.cx, cy: p.cy }));
+        submitFeedback(projectId, {
+          action: 'count_override',
+          fixture_code: highlight.fixtureCode,
+          reason: 'wrong_bounding_box',
+          reason_detail: `Added missing marker + ${highlight.rejectedIndices.size} rejected on ${plan}`,
+          fixture_data: { sheet: plan, corrected: newCount, original, rejected_positions: rejectedPositions, added_positions: addedPositions },
+        }).then(() => {
+          set((s) => ({ feedbackCount: s.feedbackCount + 1 }));
+        }).catch(() => {});
+      }
+    } else if (highlight.keynoteNumber) {
+      const kn = projectData.keynotes.find((k) => k.keynote_number === highlight.keynoteNumber);
+      const original = kn?.counts_per_plan[plan] ?? 0;
+      updateKeynoteCount(highlight.keynoteNumber, plan, newCount);
+      addCorrection({ type: 'keynote', identifier: highlight.keynoteNumber, sheet: plan, original, corrected: newCount });
+    }
+
+    get().recalcTotals();
+  },
+
+  removeAddedMarker: (index: number) => {
+    const { highlight, updateFixtureCount, updateKeynoteCount, addCorrection, projectData, projectId, savedAdditions } = get();
+    const plan = highlight.targetSheetCode;
+    if (!plan || !projectData) return;
+
+    const updatedAdded = highlight.addedPositions.filter((_, i) => i !== index);
+    const acceptedPipeline = highlight.positions.length - highlight.rejectedIndices.size;
+    const newCount = acceptedPipeline + updatedAdded.length;
+
+    set({ highlight: { ...highlight, addedPositions: updatedAdded } });
+
+    // Persist to savedAdditions
+    const itemKey = highlight.fixtureCode
+      ? `${highlight.fixtureCode}_${plan}`
+      : highlight.keynoteNumber
+        ? `kn${highlight.keynoteNumber}_${plan}`
+        : null;
+    if (itemKey) {
+      set({ savedAdditions: { ...savedAdditions, [itemKey]: updatedAdded } });
+    }
+
+    if (highlight.fixtureCode) {
+      const fixture = projectData.fixtures.find((f) => f.code === highlight.fixtureCode);
+      const original = fixture?.counts_per_plan[plan] ?? 0;
+      updateFixtureCount(highlight.fixtureCode, plan, newCount);
+      addCorrection({ type: 'lighting', identifier: highlight.fixtureCode, sheet: plan, original, corrected: newCount });
+    } else if (highlight.keynoteNumber) {
+      const kn = projectData.keynotes.find((k) => k.keynote_number === highlight.keynoteNumber);
+      const original = kn?.counts_per_plan[plan] ?? 0;
+      updateKeynoteCount(highlight.keynoteNumber, plan, newCount);
+      addCorrection({ type: 'keynote', identifier: highlight.keynoteNumber, sheet: plan, original, corrected: newCount });
+    }
+
     get().recalcTotals();
   },
 
@@ -598,22 +879,42 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   fetchResults: async (projectId: string) => {
     try {
       const data = await getResults(projectId);
+      // Deep copy the original pipeline data before any edits
+      const originalCopy = JSON.parse(JSON.stringify(data)) as ProjectData;
       set({
         projectData: data,
+        originalProjectData: originalCopy,
         appState: 'complete',
         sseActive: false,
         totalPages: getPageCount(data),
         currentPage: 1,
       });
+      // Load any existing feedback for this project
+      get().loadFeedback(projectId);
     } catch (e) {
       set({ appState: 'error', error: `Failed to load results: ${e}` });
     }
   },
 
   downloadExcel: () => {
-    const { projectId, projectData } = get();
-    if (projectId) {
-      window.open(getExcelDownloadUrl(projectId), '_blank');
+    const { projectId, projectData, originalProjectData } = get();
+    if (projectId && projectData) {
+      // If user has made corrections, POST corrected data for on-the-fly Excel
+      const summary = computeCorrectionSummary(originalProjectData, projectData);
+      if (summary.totalDiffs > 0) {
+        downloadCorrectedExcel(projectId, projectData.fixtures, projectData.keynotes)
+          .then((blob) => {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${projectData.project_name}_inventory.xlsx`;
+            a.click();
+            URL.revokeObjectURL(url);
+          })
+          .catch((e) => console.error('Failed to download corrected Excel:', e));
+      } else {
+        window.open(getExcelDownloadUrl(projectId), '_blank');
+      }
     } else if (projectData) {
       // Client-side CSV fallback for demo mode
       const plans = projectData.lighting_plans;
@@ -642,9 +943,135 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }
   },
 
+  // Feedback actions
+  addFixtureFeedback: async (item: FixtureFeedback) => {
+    const { projectId, projectData } = get();
+    if (!projectId) return;
+
+    try {
+      const resp = await submitFeedback(projectId, item);
+
+      // Optimistically add fixture row with zero counts if action is "add"
+      if (item.action === 'add' && projectData) {
+        const exists = projectData.fixtures.some(f => f.code === item.fixture_code);
+        if (!exists) {
+          const zeroCounts: Record<string, number> = {};
+          for (const plan of projectData.lighting_plans) {
+            zeroCounts[plan] = 0;
+          }
+          const newFixture = {
+            code: item.fixture_code,
+            description: item.fixture_data?.description ?? '',
+            fixture_style: item.fixture_data?.fixture_style ?? '',
+            voltage: item.fixture_data?.voltage ?? '',
+            mounting: item.fixture_data?.mounting ?? '',
+            lumens: item.fixture_data?.lumens ?? '',
+            cct: item.fixture_data?.cct ?? '',
+            dimming: item.fixture_data?.dimming ?? '',
+            max_va: item.fixture_data?.max_va ?? '',
+            counts_per_plan: zeroCounts,
+            total: 0,
+          };
+          set((s) => ({
+            projectData: s.projectData ? {
+              ...s.projectData,
+              fixtures: [...s.projectData.fixtures, newFixture],
+              summary: {
+                ...s.projectData.summary,
+                total_fixture_types: s.projectData.summary.total_fixture_types + 1,
+              },
+            } : null,
+            feedbackItems: resp.corrections ?? [...s.feedbackItems, item],
+            feedbackCount: resp.correction_count ?? s.feedbackCount + 1,
+          }));
+          return;
+        }
+      }
+
+      // For remove action, remove from local fixtures
+      if (item.action === 'remove' && projectData) {
+        set((s) => ({
+          projectData: s.projectData ? {
+            ...s.projectData,
+            fixtures: s.projectData.fixtures.filter(f => f.code !== item.fixture_code),
+            summary: {
+              ...s.projectData.summary,
+              total_fixture_types: Math.max(0, s.projectData.summary.total_fixture_types - 1),
+              total_fixtures: s.projectData.summary.total_fixtures -
+                (s.projectData.fixtures.find(f => f.code === item.fixture_code)?.total ?? 0),
+            },
+          } : null,
+          feedbackItems: resp.corrections ?? [...s.feedbackItems, item],
+          feedbackCount: resp.correction_count ?? s.feedbackCount + 1,
+        }));
+        return;
+      }
+
+      set({
+        feedbackItems: resp.corrections ?? [...get().feedbackItems, item],
+        feedbackCount: resp.correction_count ?? get().feedbackCount + 1,
+      });
+    } catch (e) {
+      console.error('Failed to submit feedback:', e);
+    }
+  },
+
+  removeFixtureFeedback: async (code: string, reason: string, detail: string) => {
+    const item: FixtureFeedback = {
+      action: 'remove',
+      fixture_code: code,
+      reason: reason as FixtureFeedback['reason'],
+      reason_detail: detail,
+    };
+    await get().addFixtureFeedback(item);
+  },
+
+  reprocessWithFeedback: async () => {
+    const { projectId } = get();
+    if (!projectId) return;
+
+    try {
+      set({
+        appState: 'processing',
+        agents: [
+          { id: 1, name: 'Search Agent', description: 'Load, discover, classify pages', status: 'pending', stats: {} },
+          { id: 2, name: 'Schedule Agent', description: 'Extract fixture specs from schedule', status: 'pending', stats: {} },
+          { id: 3, name: 'Count Agent', description: 'Count fixtures on plans', status: 'pending', stats: {} },
+          { id: 4, name: 'Keynote Agent', description: 'Extract and count keynotes', status: 'pending', stats: {} },
+          { id: 5, name: 'QA Agent', description: 'Validate and generate output', status: 'pending', stats: {} },
+        ],
+        error: null,
+      });
+
+      await reprocessProject(projectId);
+      set({ sseActive: true });
+    } catch (e) {
+      set({ appState: 'error', error: `Reprocessing failed: ${e}` });
+    }
+  },
+
+  loadFeedback: async (projectId: string) => {
+    try {
+      const resp = await getFeedback(projectId);
+      set({
+        feedbackItems: resp.corrections ?? [],
+        feedbackCount: resp.correction_count ?? 0,
+      });
+    } catch {
+      // No feedback yet -- that's fine
+      set({ feedbackItems: [], feedbackCount: 0 });
+    }
+  },
+
+  getCorrectionSummary: () => {
+    const { originalProjectData, projectData } = get();
+    return computeCorrectionSummary(originalProjectData, projectData);
+  },
+
   reset: () => set({
     appState: 'empty',
     projectData: null,
+    originalProjectData: null,
     agents: defaultAgents.map(a => ({ ...a })),
     activeTab: 'lighting',
     corrections: [],
@@ -655,5 +1082,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     sseActive: false,
     error: null,
     highlight: { ...emptyHighlight },
+    savedRejections: {},
+    savedAdditions: {},
+    feedbackItems: [],
+    feedbackCount: 0,
   }),
 }));

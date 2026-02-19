@@ -36,16 +36,25 @@ def _emit(project: ProjectState, event_type: str, data: dict) -> None:
         logger.warning("Failed to emit event %s", event_type)
 
 
-def run_pipeline(project: ProjectState, use_vision: bool = False) -> dict:
+def run_pipeline(project: ProjectState, use_vision: bool = False, hints=None, is_reprocess: bool = False) -> dict:
     """Run the full pipeline with SSE event emission.
 
     This mirrors orchestrator.py run_team() but emits events instead of printing.
+
+    Hints come from two sources:
+    1. **Learnings** (global): Accumulated corrections from past runs of the
+       same source file.  Loaded automatically on every run.
+    2. **Feedback** (per-project): Corrections from the current session's
+       "Re-run All" flow.  Passed explicitly via *hints*.
+
+    Both are merged (feedback overrides learnings for conflicts).
     """
     from medina.team.run_search import run as run_search
     from medina.team.run_schedule import run as run_schedule
     from medina.team.run_count import run as run_count
     from medina.team.run_keynote import run as run_keynote
     from medina.team.run_qa import run as run_qa
+    from medina.api.learnings import derive_learned_hints, merge_hints
 
     source = str(project.source_path)
     project_name = (
@@ -59,28 +68,60 @@ def run_pipeline(project: ProjectState, use_vision: bool = False) -> dict:
     project.status = "running"
     t0 = time.time()
 
+    # --- Auto-load learnings from past corrections for this source ---
+    learned_hints = derive_learned_hints(project.source_path)
+    if learned_hints:
+        logger.info(
+            "Loaded learnings for %s: %d extra fixtures, %d removed, "
+            "%d position overrides",
+            project_name,
+            len(learned_hints.extra_fixtures),
+            len(learned_hints.removed_codes),
+            len(learned_hints.rejected_positions) + len(learned_hints.added_positions),
+        )
+    # Merge: explicit feedback hints override learnings
+    hints = merge_hints(learned_hints, hints)
+
     try:
         # --- Agent 1: Search ---
-        _emit(project, "running", {"agent_id": 1, "agent_name": "Search Agent", "status": "running"})
-        project.current_agent = 1
-        t1 = time.time()
-        search_result = run_search(source, work_dir)
-        t_search = time.time() - t1
-        _emit(project, "completed", {
-            "agent_id": 1, "agent_name": "Search Agent", "status": "completed",
-            "time": round(t_search, 1),
-            "stats": {
-                "Pages": len(search_result.get("pages", [])),
-                "Plans found": len(search_result.get("plan_codes", [])),
-                "Schedules": len(search_result.get("schedule_codes", [])),
-            },
-        })
+        if is_reprocess and (Path(work_dir) / "search_result.json").exists():
+            # Cache hit — skip search agent on reprocessing
+            _emit(project, "running", {"agent_id": 1, "agent_name": "Search Agent", "status": "running"})
+            project.current_agent = 1
+            import json as _json
+            with open(Path(work_dir) / "search_result.json") as _f:
+                search_result = _json.load(_f)
+            _emit(project, "completed", {
+                "agent_id": 1, "agent_name": "Search Agent", "status": "completed",
+                "time": 0,
+                "stats": {
+                    "Pages": len(search_result.get("pages", [])),
+                    "Plans found": len(search_result.get("plan_codes", [])),
+                    "Schedules": len(search_result.get("schedule_codes", [])),
+                },
+                "flags": ["Cached — skipped (reprocessing)"],
+            })
+        else:
+            _emit(project, "running", {"agent_id": 1, "agent_name": "Search Agent", "status": "running"})
+            project.current_agent = 1
+            t1 = time.time()
+            search_result = run_search(source, work_dir)
+            t_search = time.time() - t1
+            _emit(project, "completed", {
+                "agent_id": 1, "agent_name": "Search Agent", "status": "completed",
+                "time": round(t_search, 1),
+                "stats": {
+                    "Pages": len(search_result.get("pages", [])),
+                    "Plans found": len(search_result.get("plan_codes", [])),
+                    "Schedules": len(search_result.get("schedule_codes", [])),
+                },
+            })
 
         # --- Agent 2: Schedule ---
         _emit(project, "running", {"agent_id": 2, "agent_name": "Schedule Agent", "status": "running"})
         project.current_agent = 2
         t2 = time.time()
-        schedule_result = run_schedule(source, work_dir)
+        schedule_result = run_schedule(source, work_dir, hints=hints)
         t_schedule = time.time() - t2
         _emit(project, "completed", {
             "agent_id": 2, "agent_name": "Schedule Agent", "status": "completed",
@@ -105,7 +146,7 @@ def run_pipeline(project: ProjectState, use_vision: bool = False) -> dict:
             keynote_result = None
 
             with ThreadPoolExecutor(max_workers=2) as executor:
-                count_future = executor.submit(run_count, source, work_dir, use_vision)
+                count_future = executor.submit(run_count, source, work_dir, use_vision, hints)
                 keynote_future = executor.submit(run_keynote, source, work_dir)
 
                 for future in as_completed([count_future, keynote_future]):
@@ -192,6 +233,24 @@ def run_pipeline(project: ProjectState, use_vision: bool = False) -> dict:
 
         project.output_path = output_path
         project.status = "completed"
+
+        # Promote feedback to global learnings and clear project feedback.
+        # Corrections are now baked into the result AND saved as persistent
+        # learnings so future runs of the same source auto-apply them.
+        from medina.api.feedback import FEEDBACK_DIR, load_project_feedback
+        from medina.api.learnings import save_learnings
+        fb = load_project_feedback(project.project_id)
+        if fb and fb.corrections:
+            save_learnings(project.source_path, fb.corrections)
+            logger.info(
+                "Promoted %d corrections to learnings for %s",
+                len(fb.corrections), project_name,
+            )
+        fb_path = FEEDBACK_DIR / f"{project.project_id}.json"
+        if fb_path.exists():
+            fb_path.unlink()
+            logger.info("Cleared project feedback for %s (promoted to learnings)",
+                        project.project_id)
 
         _emit(project, "pipeline_complete", {
             "total_time": round(total_time, 1),

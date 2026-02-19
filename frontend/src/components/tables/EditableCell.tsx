@@ -7,7 +7,7 @@ interface Props {
 }
 
 export default function EditableCell({ value, onChange, onLocate }: Props) {
-  const [edited, setEdited] = useState(false);
+  const [editing, setEditing] = useState(false);
   const cellRef = useRef<HTMLTableCellElement>(null);
 
   const handleInput = () => {
@@ -15,9 +15,9 @@ export default function EditableCell({ value, onChange, onLocate }: Props) {
     const text = cellRef.current.textContent ?? '0';
     const parsed = parseInt(text, 10) || 0;
     if (parsed !== value) {
-      setEdited(true);
       onChange(parsed);
     }
+    setEditing(false);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -25,31 +25,59 @@ export default function EditableCell({ value, onChange, onLocate }: Props) {
       e.preventDefault();
       cellRef.current?.blur();
     }
+    if (e.key === 'Escape') {
+      // Reset to original value and blur
+      if (cellRef.current) cellRef.current.textContent = String(value);
+      cellRef.current?.blur();
+      setEditing(false);
+    }
+  };
+
+  const handleClick = () => {
+    if (!editing && onLocate) {
+      onLocate();
+    }
+  };
+
+  const handleDoubleClick = () => {
+    setEditing(true);
+    // Select the text for easy replacement
+    setTimeout(() => {
+      if (cellRef.current) {
+        const range = document.createRange();
+        range.selectNodeContents(cellRef.current);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      }
+    }, 0);
   };
 
   return (
     <td
       ref={cellRef}
-      contentEditable
+      contentEditable={editing}
       suppressContentEditableWarning
       onBlur={handleInput}
       onKeyDown={handleKeyDown}
-      className={`px-3.5 py-2 text-center border-b border-r border-border cursor-text focus:outline-2 focus:outline-accent focus:bg-white relative group/cell ${
-        edited ? '!bg-edit-highlight' : ''
+      onClick={handleClick}
+      onDoubleClick={handleDoubleClick}
+      className={`px-3.5 py-2 text-center border-b border-r border-border relative group/cell ${
+        editing
+          ? 'cursor-text outline-2 outline-accent bg-white'
+          : onLocate
+            ? 'cursor-pointer hover:bg-blue-50 hover:text-accent hover:font-semibold'
+            : 'cursor-text'
       } ${value === 0 ? 'text-slate-300' : ''}`}
+      title={onLocate && !editing ? 'Click to locate on plan · Double-click to edit' : undefined}
     >
       {value}
-      {onLocate && (
-        <button
-          onClick={(e) => { e.stopPropagation(); onLocate(); }}
-          className="absolute right-0.5 top-1/2 -translate-y-1/2 opacity-0 group-hover/cell:opacity-100 transition-opacity bg-accent/80 text-white rounded p-0.5 text-[9px] leading-none hover:bg-accent"
-          title="Locate on plan"
-          contentEditable={false}
-        >
-          <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3">
+      {onLocate && !editing && (
+        <span className="absolute right-0.5 top-1/2 -translate-y-1/2 opacity-0 group-hover/cell:opacity-60 text-accent text-[9px] pointer-events-none">
+          <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5">
             <path d="M8 1a5 5 0 0 0-5 5c0 3.5 5 9 5 9s5-5.5 5-9a5 5 0 0 0-5-5zm0 7a2 2 0 1 1 0-4 2 2 0 0 1 0 4z" />
           </svg>
-        </button>
+        </span>
       )}
     </td>
   );

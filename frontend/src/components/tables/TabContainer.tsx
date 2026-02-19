@@ -1,9 +1,12 @@
+import { useState } from 'react';
 import { useProjectStore } from '../../store/projectStore';
 import FixtureTable from './FixtureTable';
 import KeynoteTable from './KeynoteTable';
+import AddFixtureModal from './AddFixtureModal';
 
 export default function TabContainer() {
-  const { activeTab, setActiveTab, projectData, editCount, recalcTotals, saveEdits, projectId, appState, error } = useProjectStore();
+  const { activeTab, setActiveTab, projectData, editCount, recalcTotals, projectId, appState, error, feedbackCount, addFixtureFeedback } = useProjectStore();
+  const [showAddModal, setShowAddModal] = useState(false);
 
   const fixtureCount = projectData?.fixtures.length ?? 0;
   const keynoteCount = projectData?.keynotes.length ?? 0;
@@ -128,22 +131,29 @@ export default function TabContainer() {
       {/* Toolbar */}
       <div className="px-4 py-2.5 bg-card flex items-center justify-between border-b border-border">
         <div className="flex items-center gap-3">
+          <button
+            className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 cursor-pointer transition-all flex items-center gap-1"
+            onClick={() => setShowAddModal(true)}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            Add Fixture
+          </button>
           <span className="text-xs text-text-light">Click any count cell to edit</span>
           {editCount > 0 && (
             <span className="text-[11px] text-warning font-semibold">
               {editCount} manual edit{editCount > 1 ? 's' : ''}
             </span>
           )}
+          {feedbackCount > 0 && (
+            <span className="text-[11px] text-blue-600 font-semibold bg-blue-50 px-2 py-0.5 rounded-full">
+              {feedbackCount} correction{feedbackCount > 1 ? 's' : ''}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          {editCount > 0 && projectId && (
-            <button
-              className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-white hover:bg-accent-hover cursor-pointer transition-all"
-              onClick={saveEdits}
-            >
-              Save Corrections
-            </button>
-          )}
           <button
             className="px-3 py-1.5 rounded-md text-xs font-semibold bg-white text-text-main border border-border hover:bg-bg cursor-pointer transition-all"
             onClick={recalcTotals}
@@ -155,6 +165,13 @@ export default function TabContainer() {
 
       {/* Table */}
       {activeTab === 'lighting' ? <FixtureTable /> : <KeynoteTable />}
+
+      {showAddModal && (
+        <AddFixtureModal
+          onSubmit={addFixtureFeedback}
+          onClose={() => setShowAddModal(false)}
+        />
+      )}
     </div>
   );
 }

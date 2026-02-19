@@ -447,6 +447,8 @@ def count_fixtures_on_plan(
     fixture_codes: list[str],
     plan_sheet_codes: list[str] | None = None,
     return_positions: bool = False,
+    rejected_positions: dict[str, list[dict[str, float]]] | None = None,
+    added_positions: dict[str, list[dict[str, float]]] | None = None,
 ) -> dict[str, int] | dict[str, dict]:
     """Count occurrences of each fixture code on a single lighting plan page.
 
@@ -464,6 +466,12 @@ def count_fixtures_on_plan(
             codes that match a sheet code get extra filtering to avoid
             counting cross-reference labels (e.g., "SEE E1A").
         return_positions: If True, return enriched dict with positions.
+        rejected_positions: Optional per-code list of positions the user
+            flagged as incorrect. Matches near these positions are excluded.
+            Format: ``{fixture_code: [{x0, top, x1, bottom, cx, cy}, ...]}``
+        added_positions: Optional per-code list of positions the user
+            identified as missed fixtures. These are added to the count.
+            Format: ``{fixture_code: [{x0, top, x1, bottom, cx, cy}, ...]}``
 
     Returns:
         If ``return_positions`` is False: ``{fixture_code: count}``.
@@ -542,6 +550,75 @@ def count_fixtures_on_plan(
                     removed, before, code, sheet,
                 )
 
+    # --- Step 4: rejected position filtering (human-in-the-loop) ---
+    # The user flagged specific marker positions as incorrect.  Remove any
+    # match whose center is within 15 pts of a rejected position so the
+    # pipeline doesn't repeat the same mistake.
+    _REJECT_RADIUS = 15.0
+    if rejected_positions:
+        for code in fixture_codes:
+            rejects = rejected_positions.get(code, [])
+            if not rejects or not all_matches.get(code):
+                continue
+            before = len(all_matches[code])
+            kept = []
+            for m in all_matches[code]:
+                is_rejected = False
+                for rp in rejects:
+                    dist = ((m["cx"] - rp["cx"]) ** 2
+                            + (m["cy"] - rp["cy"]) ** 2) ** 0.5
+                    if dist < _REJECT_RADIUS:
+                        is_rejected = True
+                        break
+                if not is_rejected:
+                    kept.append(m)
+            all_matches[code] = kept
+            removed = before - len(kept)
+            if removed:
+                logger.info(
+                    "User rejection filter removed %d/%d matches for %s on %s",
+                    removed, before, code, sheet,
+                )
+
+    # --- Step 5: inject user-added positions (human-in-the-loop) ---
+    # The user clicked on the plan where the pipeline missed a fixture.
+    # Add these as real matches so the count includes them and the
+    # positions show up in the output.  Skip any added position that
+    # is already near an existing match (within 15pts) to avoid doubles.
+    if added_positions:
+        for code in fixture_codes:
+            adds = added_positions.get(code, [])
+            if not adds:
+                continue
+            existing = all_matches.get(code, [])
+            injected = 0
+            for ap in adds:
+                already_found = False
+                for m in existing:
+                    dist = ((m["cx"] - ap["cx"]) ** 2
+                            + (m["cy"] - ap["cy"]) ** 2) ** 0.5
+                    if dist < _REJECT_RADIUS:
+                        already_found = True
+                        break
+                if not already_found:
+                    all_matches.setdefault(code, []).append({
+                        "x0": ap.get("x0", ap["cx"] - 10),
+                        "top": ap.get("top", ap["cy"] - 10),
+                        "x1": ap.get("x1", ap["cx"] + 10),
+                        "bottom": ap.get("bottom", ap["cy"] + 10),
+                        "cx": ap["cx"],
+                        "cy": ap["cy"],
+                        "font_size": 0,  # user-added, no font
+                        "char_index": -1,  # sentinel: not from text
+                        "user_added": True,
+                    })
+                    injected += 1
+            if injected:
+                logger.info(
+                    "User added %d position(s) for %s on %s",
+                    injected, code, sheet,
+                )
+
     # --- Build final counts ---
     counts: dict[str, int] = {}
     for code in fixture_codes:
@@ -587,6 +664,8 @@ def count_all_plans(
     fixture_codes: list[str],
     plan_sheet_codes: list[str] | None = None,
     return_positions: bool = False,
+    all_rejected_positions: dict[str, dict[str, list[dict[str, float]]]] | None = None,
+    all_added_positions: dict[str, dict[str, list[dict[str, float]]]] | None = None,
 ) -> dict[str, dict[str, int]] | tuple[dict[str, dict[str, int]], dict]:
     """Count fixtures on all lighting plan pages.
 
@@ -597,6 +676,11 @@ def count_all_plans(
         plan_sheet_codes: Optional list of known plan sheet codes for
             cross-reference filtering.
         return_positions: If True, also return position data.
+        all_rejected_positions: Optional per-code per-plan rejected
+            positions from user feedback.  Format:
+            ``{fixture_code: {sheet_code: [{x0, top, ...}, ...]}}``.
+        all_added_positions: Optional per-code per-plan user-added
+            positions from feedback.  Format same as rejected.
 
     Returns:
         If ``return_positions`` is False:
@@ -624,11 +708,34 @@ def count_all_plans(
                 }
             continue
 
+        # Build per-code rejected/added positions for this specific plan page
+        plan_rejects: dict[str, list[dict[str, float]]] | None = None
+        if all_rejected_positions:
+            plan_rejects = {}
+            for code, per_plan in all_rejected_positions.items():
+                rp = per_plan.get(sheet, [])
+                if rp:
+                    plan_rejects[code] = rp
+            if not plan_rejects:
+                plan_rejects = None
+
+        plan_adds: dict[str, list[dict[str, float]]] | None = None
+        if all_added_positions:
+            plan_adds = {}
+            for code, per_plan in all_added_positions.items():
+                ap = per_plan.get(sheet, [])
+                if ap:
+                    plan_adds[code] = ap
+            if not plan_adds:
+                plan_adds = None
+
         try:
             raw = count_fixtures_on_plan(
                 page_info, pdf_page, fixture_codes,
                 plan_sheet_codes=plan_sheet_codes,
                 return_positions=return_positions,
+                rejected_positions=plan_rejects,
+                added_positions=plan_adds,
             )
         except FixtureCountError:
             logger.exception("Error counting fixtures on plan %s", sheet)

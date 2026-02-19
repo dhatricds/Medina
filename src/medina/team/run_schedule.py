@@ -46,7 +46,7 @@ def _is_valid_fixture_code(code: str) -> bool:
     return True
 
 
-def run(source: str, work_dir: str) -> dict:
+def run(source: str, work_dir: str, hints=None) -> dict:
     """Run stage 4: SCHEDULE EXTRACTION."""
     from medina.pdf.loader import load
     from medina.pdf.classifier import classify_pages
@@ -201,6 +201,55 @@ def run(source: str, work_dir: str) -> dict:
             seen.add(f.code)
             deduped.append(f)
     fixtures = deduped
+
+    # --- Apply user feedback hints ---
+    if hints is not None:
+        # Remove user-flagged fixtures
+        if hints.removed_codes:
+            before = len(fixtures)
+            fixtures = [f for f in fixtures if f.code not in hints.removed_codes]
+            for code in hints.removed_codes:
+                logger.info("[SCHEDULE] User hint: removed %s", code)
+            if before > len(fixtures):
+                logger.info(
+                    "[SCHEDULE] Removed %d fixture(s) via user hints",
+                    before - len(fixtures),
+                )
+
+        # Add user-provided fixtures
+        if hints.extra_fixtures:
+            from medina.models import FixtureRecord
+            existing_codes = {f.code for f in fixtures}
+            for fx_data in hints.extra_fixtures:
+                code = fx_data.get("code", "")
+                if code and code not in existing_codes:
+                    new_fixture = FixtureRecord(
+                        code=code,
+                        description=fx_data.get("description", ""),
+                        fixture_style=fx_data.get("fixture_style", ""),
+                        voltage=fx_data.get("voltage", ""),
+                        mounting=fx_data.get("mounting", ""),
+                        lumens=fx_data.get("lumens", ""),
+                        cct=fx_data.get("cct", ""),
+                        dimming=fx_data.get("dimming", ""),
+                        max_va=fx_data.get("max_va", ""),
+                    )
+                    fixtures.append(new_fixture)
+                    existing_codes.add(code)
+                    logger.info("[SCHEDULE] User hint: added %s", code)
+
+        # Apply spec patches
+        if hints.spec_patches:
+            for f in fixtures:
+                if f.code in hints.spec_patches:
+                    patches = hints.spec_patches[f.code]
+                    for field_name, value in patches.items():
+                        if hasattr(f, field_name):
+                            setattr(f, field_name, value)
+                            logger.info(
+                                "[SCHEDULE] User hint: patched %s.%s = %s",
+                                f.code, field_name, value,
+                            )
 
     fixture_codes = [f.code for f in fixtures]
 
