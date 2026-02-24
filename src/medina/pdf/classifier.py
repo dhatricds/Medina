@@ -380,17 +380,20 @@ def _classify_from_title_block(page: Any) -> PageType | None:
     page's actual title. This is more reliable than full-page text
     which may contain cross-references to other pages.
     """
-    width = page.width
-    height = page.height
+    # Use page.bbox for origin-aware coordinates — some PDFs have
+    # non-zero origins (e.g., bbox starts at x=-1224).
+    x0, y0, x1, y1 = page.bbox
+    w = x1 - x0
+    h = y1 - y0
 
     # Crop to title block area (bottom-right).
     # Use bottom 15% (not 20%) to avoid capturing sheet index listings
     # that may appear just above the title block on symbols/cover pages.
     bbox = (
-        width * 0.55,
-        height * 0.85,
-        width,
-        height,
+        x0 + w * 0.55,
+        y0 + h * 0.85,
+        x1,
+        y1,
     )
     try:
         cropped = page.within_bbox(bbox)

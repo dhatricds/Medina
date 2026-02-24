@@ -167,6 +167,11 @@ interface ProjectStore {
   sseActive: boolean;
   error: string | null;
 
+  // Fix It panel (deprecated, kept for compat)
+  fixItOpen: boolean;
+  // Chat panel (replaces Fix It)
+  chatOpen: boolean;
+
   // Feedback state
   feedbackItems: FixtureFeedback[];
   feedbackCount: number;
@@ -178,6 +183,12 @@ interface ProjectStore {
   /** Persisted user-added marker positions per "code_plan" key. */
   savedAdditions: Record<string, FixturePosition[]>;
 
+  // Reprocess diff tracking
+  /** Snapshot of projectData before a reprocess, used to compute diffs. */
+  preReprocessData: ProjectData | null;
+  /** Changed cells after reprocess: code → plan → oldCount. Only contains entries where count changed. */
+  reprocessDiffs: Record<string, Record<string, number>>;
+
   // Dashboard state
   dashboardProjects: DashboardProject[];
   dashboardDetail: ProjectData | null;
@@ -187,6 +198,10 @@ interface ProjectStore {
   // View actions
   setView: (view: ViewMode) => void;
 
+  // Reprocess diff actions
+  savePreReprocessSnapshot: () => void;
+  clearReprocessDiffs: () => void;
+
   // Dashboard actions
   loadDashboard: () => Promise<void>;
   approveCurrentProject: () => Promise<void>;
@@ -195,9 +210,14 @@ interface ProjectStore {
   removeDashboardProject: (id: string) => Promise<void>;
   downloadDashboardExcel: (id: string) => void;
 
+  // Fix It / Chat actions
+  setFixItOpen: (open: boolean) => void;
+  setChatOpen: (open: boolean) => void;
+
   // Highlight actions
   highlightFixture: (code: string, targetPlan?: string) => Promise<void>;
   highlightKeynote: (number: string, targetPlan?: string) => Promise<void>;
+  navigateToSchedule: (code: string) => void;
   clearHighlight: () => void;
   toggleMarker: (index: number) => void;
   navigateHighlight: (direction: 'prev' | 'next') => void;
@@ -257,6 +277,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   sseActive: false,
   error: null,
 
+  // Fix It panel
+  fixItOpen: false,
+  chatOpen: false,
+
   // Feedback state
   feedbackItems: [],
   feedbackCount: 0,
@@ -266,6 +290,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   savedRejections: {},
   savedAdditions: {},
 
+  // Reprocess diff tracking
+  preReprocessData: null,
+  reprocessDiffs: {},
+
   // Dashboard state
   dashboardProjects: [],
   dashboardDetail: null,
@@ -274,6 +302,15 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   // View actions
   setView: (view) => set({ view }),
+
+  // Reprocess diff actions
+  savePreReprocessSnapshot: () => {
+    const { projectData } = get();
+    if (projectData) {
+      set({ preReprocessData: JSON.parse(JSON.stringify(projectData)) });
+    }
+  },
+  clearReprocessDiffs: () => set({ reprocessDiffs: {}, preReprocessData: null }),
 
   // Dashboard actions
   loadDashboard: async () => {
@@ -342,6 +379,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     window.open(getDashboardExcelUrl(id), '_blank');
   },
 
+  // Fix It / Chat actions
+  setFixItOpen: (open: boolean) => set({ fixItOpen: open }),
+  setChatOpen: (open: boolean) => set({ chatOpen: open, fixItOpen: false }),
+
   // Highlight actions
   highlightFixture: async (code: string, targetPlan?: string) => {
     const { projectId, projectData, savedRejections, savedAdditions } = get();
@@ -392,7 +433,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
     // Fetch positions
     try {
-      const resp = await getPagePositions(projectId, pageEntry.page_number);
+      const resp = await getPagePositions(projectId, pageEntry.page_number, planCode);
       if (resp.fixture_positions && resp.fixture_positions[code]) {
         set({
           highlight: {
@@ -478,7 +519,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     });
 
     try {
-      const resp = await getPagePositions(projectId, pageEntry.page_number);
+      const resp = await getPagePositions(projectId, pageEntry.page_number, planCode);
       if (resp.keynote_positions && resp.keynote_positions[number]) {
         set({
           highlight: {
@@ -520,6 +561,37 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   clearHighlight: () => set({ highlight: { ...emptyHighlight } }),
+
+  navigateToSchedule: (code: string) => {
+    const { projectData } = get();
+    if (!projectData) return;
+
+    // Find the fixture to get its schedule_page
+    const fixture = projectData.fixtures.find((f) => f.code === code);
+    const scheduleCode = fixture?.schedule_page || projectData.schedule_pages[0];
+    if (!scheduleCode) return;
+
+    // Look up page number from pages array
+    const pages = projectData.pages ?? [];
+    const pageEntry = pages.find((p) => p.sheet_code === scheduleCode);
+    if (pageEntry) {
+      set({ currentPage: pageEntry.page_number, highlight: { ...emptyHighlight } });
+      return;
+    }
+
+    // If scheduleCode is a page number string (e.g., "10"), navigate directly
+    const asNum = parseInt(scheduleCode, 10);
+    if (!isNaN(asNum) && asNum >= 1 && asNum <= pages.length) {
+      set({ currentPage: asNum, highlight: { ...emptyHighlight } });
+      return;
+    }
+
+    // Fallback: find schedule page index from sheet_index ordering
+    const idx = projectData.sheet_index.findIndex((s) => s.sheet_code === scheduleCode);
+    if (idx >= 0) {
+      set({ currentPage: idx + 1, highlight: { ...emptyHighlight } });
+    }
+  },
 
   navigateHighlight: (direction: 'prev' | 'next') => {
     const { highlight, highlightFixture, highlightKeynote } = get();
@@ -881,6 +953,25 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       const data = await getResults(projectId);
       // Deep copy the original pipeline data before any edits
       const originalCopy = JSON.parse(JSON.stringify(data)) as ProjectData;
+
+      // Compute diffs if we have a pre-reprocess snapshot
+      const { preReprocessData } = get();
+      let diffs: Record<string, Record<string, number>> = {};
+      if (preReprocessData) {
+        for (const fixture of data.fixtures) {
+          const oldFixture = preReprocessData.fixtures.find((f) => f.code === fixture.code);
+          if (!oldFixture) continue;
+          for (const plan of data.lighting_plans) {
+            const oldCount = oldFixture.counts_per_plan[plan] ?? 0;
+            const newCount = fixture.counts_per_plan[plan] ?? 0;
+            if (oldCount !== newCount) {
+              if (!diffs[fixture.code]) diffs[fixture.code] = {};
+              diffs[fixture.code][plan] = oldCount;
+            }
+          }
+        }
+      }
+
       set({
         projectData: data,
         originalProjectData: originalCopy,
@@ -888,6 +979,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         sseActive: false,
         totalPages: getPageCount(data),
         currentPage: 1,
+        reprocessDiffs: diffs,
+        preReprocessData: null,
       });
       // Load any existing feedback for this project
       get().loadFeedback(projectId);
@@ -1030,6 +1123,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const { projectId } = get();
     if (!projectId) return;
 
+    // Save snapshot for diff tracking
+    get().savePreReprocessSnapshot();
+
     try {
       set({
         appState: 'processing',
@@ -1084,7 +1180,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     highlight: { ...emptyHighlight },
     savedRejections: {},
     savedAdditions: {},
+    fixItOpen: false,
+    chatOpen: false,
     feedbackItems: [],
     feedbackCount: 0,
+    preReprocessData: null,
+    reprocessDiffs: {},
   }),
 }));

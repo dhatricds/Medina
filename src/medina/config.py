@@ -27,6 +27,12 @@ class MedinaConfig(BaseSettings):
     output_format: str = "both"  # "excel", "json", "both"
     qa_confidence_threshold: float = 0.95
     qa_fail_action: str = "warn"  # "warn", "error", "both"
+    db_path: str = "output/medina.db"
+    chroma_path: str = "output/chroma_db"
+
+    # Auth / JWT settings
+    jwt_secret_key: str = ""  # MEDINA_JWT_SECRET_KEY (auto-generated if empty)
+    jwt_expiry_hours: int = 8  # MEDINA_JWT_EXPIRY_HOURS
 
     schedule_include_keywords: list[str] = [
         "luminaire schedule",

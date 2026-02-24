@@ -23,8 +23,15 @@ logging.basicConfig(
 logger = logging.getLogger("medina.team.search")
 
 
-def run(source: str, work_dir: str) -> dict:
-    """Run stages 1-3: LOAD, DISCOVER, CLASSIFY."""
+def run(source: str, work_dir: str, hints=None) -> dict:
+    """Run stages 1-3: LOAD, DISCOVER, CLASSIFY.
+
+    Args:
+        source: Path to source PDF or folder.
+        work_dir: Directory for intermediate results.
+        hints: Optional FeedbackHints with page_overrides to force
+               page classifications.
+    """
     from medina.pdf.loader import load
     from medina.pdf.sheet_index import discover_sheet_index
     from medina.pdf.classifier import classify_pages
@@ -51,10 +58,103 @@ def run(source: str, work_dir: str) -> dict:
     logger.info("[SEARCH] Classifying pages...")
     pages = classify_pages(pages, pdf_pages, sheet_index)
 
+    # --- Backfill missing sheet codes from sheet index ---
+    # When pages have no sheet_code (e.g., scanned PDFs with timestamps
+    # in title blocks), match them to sheet index entries by page type
+    # and order.  E.g., if the index lists e1.1, e1.2 as lighting plans
+    # and the classifier found 2 LIGHTING_PLAN pages with no codes,
+    # assign e1.1 to the first and e1.2 to the second.
+    if sheet_index:
+        _backfill_sheet_codes(pages, sheet_index)
+
+    # --- Apply user page classification overrides ---
+    page_overrides = {}
+    if hints and hasattr(hints, "page_overrides"):
+        page_overrides = hints.page_overrides or {}
+    if page_overrides:
+        _apply_page_overrides(pages, page_overrides)
+        # Re-run backfill — overrides may have changed page types,
+        # allowing previously-unmatched sheet index entries to pair
+        # with the newly-reclassified pages.
+        if sheet_index:
+            _backfill_sheet_codes(pages, sheet_index)
+
+    # --- Multi-viewport detection ---
+    # For each lighting plan, check if it contains multiple viewports
+    # (e.g., "LEVEL 1 ENLARGED LIGHTING PLAN" + "MEZZANINE ENLARGED LIGHTING PLAN").
+    # Also apply user-provided viewport splits from hints.
+    viewport_splits = {}
+    if hints and hasattr(hints, "viewport_splits"):
+        viewport_splits = hints.viewport_splits or {}
+
+    from medina.plans.viewport_detector import detect_viewports, split_page_into_viewports
+
+    expanded_pages: list = []
+    viewport_map: dict[str, int] = {}  # composite_code -> physical page_number
+    for p in pages:
+        if p.page_type == PageType.LIGHTING_PLAN:
+            # Check user-provided splits first
+            p_key = p.sheet_code or str(p.page_number)
+            user_split_data = viewport_splits.get(p_key)
+            if user_split_data is not None and len(user_split_data) > 0:
+                # User/LLM provided viewport hints.  If they include a
+                # bbox they are fully defined; otherwise treat them as
+                # label-only hints and fall through to auto-detect.
+                from medina.models import Viewport
+                all_have_bbox = all(
+                    isinstance(vp, dict) and "bbox" in vp
+                    for vp in user_split_data
+                )
+                if all_have_bbox:
+                    user_vps = [
+                        Viewport.model_validate(vp)
+                        for vp in user_split_data
+                    ]
+                    virtual = split_page_into_viewports(p, user_vps)
+                else:
+                    # Labels without bbox — auto-detect to get real boxes
+                    logger.info(
+                        "Viewport hints for %s lack bbox — falling back "
+                        "to auto-detect",
+                        p_key,
+                    )
+                    pdf_page = pdf_pages.get(p.page_number)
+                    if pdf_page is not None:
+                        vps = detect_viewports(pdf_page, p)
+                        virtual = split_page_into_viewports(p, vps)
+                    else:
+                        virtual = [p]
+            else:
+                # Auto-detect viewports (triggered for all lighting plans,
+                # or when user sent empty list = "auto-detect" sentinel)
+                pdf_page = pdf_pages.get(p.page_number)
+                if pdf_page is not None:
+                    vps = detect_viewports(pdf_page, p)
+                    virtual = split_page_into_viewports(p, vps)
+                else:
+                    virtual = [p]
+            for vp in virtual:
+                expanded_pages.append(vp)
+                if vp.parent_sheet_code:
+                    viewport_map[vp.sheet_code] = vp.page_number
+        else:
+            expanded_pages.append(p)
+    pages = expanded_pages
+
     plan_pages = [p for p in pages if p.page_type == PageType.LIGHTING_PLAN]
     schedule_pages = [p for p in pages if p.page_type == PageType.SCHEDULE]
-    plan_codes = [p.sheet_code for p in plan_pages if p.sheet_code]
-    schedule_codes = [p.sheet_code for p in schedule_pages if p.sheet_code]
+    # Ensure every plan/schedule page has a sheet_code — downstream agents
+    # skip pages without one.  Fall back to "pg{N}" for pages that didn't
+    # get a code from title block or backfill.
+    for p in plan_pages + schedule_pages:
+        if not p.sheet_code:
+            p.sheet_code = f"pg{p.page_number}"
+            logger.info(
+                "[SEARCH] Assigned fallback code %s to page %d (%s)",
+                p.sheet_code, p.page_number, p.page_type.value,
+            )
+    plan_codes = [p.sheet_code for p in plan_pages]
+    schedule_codes = [p.sheet_code for p in schedule_pages]
 
     logger.info(
         "[SEARCH] Classification complete: %d lighting plans, %d schedules",
@@ -104,7 +204,8 @@ def run(source: str, work_dir: str) -> dict:
                         p.sheet_code for p in plan_pages if p.sheet_code
                     ]
                     schedule_codes = [
-                        p.sheet_code for p in schedule_pages if p.sheet_code
+                        p.sheet_code or str(p.page_number)
+                        for p in schedule_pages
                     ]
                     logger.info(
                         "[SEARCH] After VLM: %d lighting plans, %d schedules",
@@ -134,6 +235,7 @@ def run(source: str, work_dir: str) -> dict:
         "sheet_index": [e.model_dump(mode="json") for e in sheet_index],
         "plan_codes": plan_codes,
         "schedule_codes": schedule_codes,
+        "viewport_map": viewport_map,
     }
 
     out_file = work_path / "search_result.json"
@@ -152,6 +254,115 @@ def run(source: str, work_dir: str) -> dict:
     print(f"Results saved to: {out_file}")
 
     return result
+
+
+def _apply_page_overrides(
+    pages: list,
+    page_overrides: dict[str, str],
+) -> None:
+    """Apply user page classification overrides.
+
+    Overrides can reference pages by sheet_code (e.g., "E601") or by
+    page_number as a string (e.g., "5").
+    """
+    from medina.models import PageType
+
+    type_map = {t.value: t for t in PageType}
+
+    for key, page_type_str in page_overrides.items():
+        if not key:
+            continue  # Skip empty keys
+        target_type = type_map.get(page_type_str)
+        if not target_type:
+            logger.warning(
+                "[SEARCH] Unknown page type in override: %s", page_type_str
+            )
+            continue
+
+        # Normalize key: "page_4" / "pg4" → "4"
+        norm_key = key
+        for prefix in ("page_", "pg"):
+            if norm_key.lower().startswith(prefix):
+                norm_key = norm_key[len(prefix):]
+                break
+
+        matched = False
+        for page in pages:
+            # Match by sheet code (case-insensitive)
+            if page.sheet_code and page.sheet_code.upper() == norm_key.upper():
+                old_type = page.page_type.value
+                page.page_type = target_type
+                logger.info(
+                    "[SEARCH] Page override: page %d (%s) %s -> %s",
+                    page.page_number, page.sheet_code, old_type, target_type.value,
+                )
+                matched = True
+                break
+            # Match by page number
+            if norm_key.isdigit() and page.page_number == int(norm_key):
+                old_type = page.page_type.value
+                page.page_type = target_type
+                logger.info(
+                    "[SEARCH] Page override: page %d (%s) %s -> %s",
+                    page.page_number, page.sheet_code or "?",
+                    old_type, target_type.value,
+                )
+                matched = True
+                break
+
+        if not matched:
+            logger.warning(
+                "[SEARCH] Page override target not found: %s", key
+            )
+
+
+def _backfill_sheet_codes(
+    pages: list,
+    sheet_index: list,
+) -> None:
+    """Assign sheet codes from the sheet index to pages missing them.
+
+    For each page type (lighting_plan, schedule, etc.), collect:
+    - Sheet index entries of that type whose code isn't on any page
+    - Pages of that type with no sheet_code
+    Then match them in order.
+    """
+    from medina.models import PageType
+
+    existing_codes = {
+        p.sheet_code.upper() for p in pages if p.sheet_code
+    }
+
+    for page_type in (
+        PageType.LIGHTING_PLAN,
+        PageType.SCHEDULE,
+        PageType.DEMOLITION_PLAN,
+        PageType.POWER_PLAN,
+    ):
+        # Index entries of this type not yet matched to a page
+        unmatched_entries = [
+            e for e in sheet_index
+            if e.inferred_type == page_type
+            and e.sheet_code.upper() not in existing_codes
+        ]
+        # Pages of this type with no sheet code
+        unmatched_pages = [
+            p for p in pages
+            if p.page_type == page_type and not p.sheet_code
+        ]
+
+        if not unmatched_entries or not unmatched_pages:
+            continue
+
+        for page, entry in zip(unmatched_pages, unmatched_entries):
+            page.sheet_code = entry.sheet_code
+            logger.info(
+                "[SEARCH] Backfilled page %d with sheet code %s "
+                "from sheet index (%s)",
+                page.page_number,
+                entry.sheet_code,
+                page_type.value,
+            )
 
 
 if __name__ == "__main__":

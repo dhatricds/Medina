@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from medina.api.models import CorrectionRequest
 from medina.api.projects import get_project
@@ -13,9 +13,9 @@ router = APIRouter(prefix="/api", tags=["corrections"])
 
 
 @router.patch("/projects/{project_id}/corrections")
-async def save_corrections(project_id: str, req: CorrectionRequest):
+async def save_corrections(project_id: str, request: Request, req: CorrectionRequest):
     """Save user cell corrections."""
-    project = get_project(project_id)
+    project = get_project(project_id, tenant_id=getattr(request.state, "tenant_id", "default"))
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 

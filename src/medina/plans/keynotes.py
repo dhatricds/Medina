@@ -17,6 +17,8 @@ _KEYNOTES_HEADER_PATTERNS = [
     re.compile(r'KEY\s*NOTES\b', re.IGNORECASE),
     re.compile(r'KEYED\s+SHEET\s+NOTES?\s*:', re.IGNORECASE),
     re.compile(r'KEYED\s+SHEET\s+NOTES?\b', re.IGNORECASE),
+    re.compile(r'KEYED\s+PLAN\s+NOTES?\s*:', re.IGNORECASE),
+    re.compile(r'KEYED\s+PLAN\s+NOTES?\b', re.IGNORECASE),
     re.compile(r'KEYED\s+NOTES\s*:', re.IGNORECASE),
     re.compile(r'KEYED\s+NOTES\b', re.IGNORECASE),
     re.compile(r'KEYNOTES\s*:', re.IGNORECASE),
@@ -115,7 +117,13 @@ def _trim_section(section_text: str) -> str:
     return "\n".join(trimmed)
 
 
-def _parse_keynote_entries(section_text: str) -> list[tuple[str, str]]:
+_MAX_KEYNOTE_NUMBER = 20
+
+
+def _parse_keynote_entries(
+    section_text: str,
+    max_keynote_number: int | None = None,
+) -> list[tuple[str, str]]:
     """Parse numbered keynote entries from the keynotes section text.
 
     Returns list of ``(number_str, keynote_text)`` tuples.
@@ -159,8 +167,9 @@ def _parse_keynote_entries(section_text: str) -> list[tuple[str, str]]:
             num_val = int(num_str)
         except ValueError:
             continue
-        if num_val > 20:
-            logger.debug("Skipping keynote #%s: number too high", num_str)
+        max_kn = max_keynote_number if max_keynote_number is not None else _MAX_KEYNOTE_NUMBER
+        if num_val > max_kn:
+            logger.debug("Skipping keynote #%s: number too high (>%d)", num_str, max_kn)
             continue
 
         # Text should be meaningful (not just fixture codes or addresses).
@@ -200,17 +209,29 @@ def _check_enclosed_by_shape(
     lines: list[Any],
     inner_r: float = 2.0,
     outer_r: float = 10.0,
+    min_seg_len: float = 3.0,
 ) -> int:
     """Check if a point is enclosed by line endpoints in all quadrants.
 
     Keynote symbols (diamonds, hexagons, etc.) have line endpoints
     surrounding the number in all four quadrants. Returns the number
     of quadrants (0–4) that have nearby line endpoints.
+
+    Only considers endpoints from line segments whose length is at
+    least ``min_seg_len`` — this filters out dense hatching/render
+    artifacts that produce false enclosures on busy pages.
     """
     import math
 
     quadrants: set[str] = set()
     for ln in lines:
+        # Skip tiny line segments (hatching, render artifacts).
+        seg_len = math.sqrt(
+            (ln["x1"] - ln["x0"]) ** 2 + (ln["bottom"] - ln["top"]) ** 2
+        )
+        if seg_len < min_seg_len:
+            continue
+
         for px, py in [(ln["x0"], ln["top"]), (ln["x1"], ln["bottom"])]:
             dist = math.sqrt((px - cx) ** 2 + (py - cy) ** 2)
             if inner_r < dist < outer_r:
@@ -229,12 +250,78 @@ def _check_enclosed_by_shape(
     return len(quadrants)
 
 
+def _check_shape_quality(
+    cx: float,
+    cy: float,
+    shape_lines: list[Any],
+    radius: float = 13.0,
+) -> tuple[int, int, float]:
+    """Assess whether nearby line segments form a coherent polygon enclosure.
+
+    Real keynote symbols (hexagons, diamonds) have a small number of
+    polygon edges at a consistent distance from the center, with vertices
+    shared by exactly 2 edges (closed polygon).  Dense wiring/hatching
+    produces many random segments that do NOT form a coherent polygon.
+
+    Args:
+        cx, cy: Center point of the candidate number.
+        shape_lines: Pre-filtered lines with length in [3, 20] pt.
+        radius: Maximum distance from center for both endpoints.
+
+    Returns:
+        Tuple of (shape_segs, pts_used_twice, std_mid_dist):
+        - shape_segs: Segments with both endpoints within *radius*.
+        - pts_used_twice: Vertex clusters shared by exactly 2 edges
+          (indicator of a closed polygon).
+        - std_mid_dist: Std-dev of midpoint distances from center
+          (low for real shapes, high for random wiring).
+    """
+    import math
+    from collections import Counter
+
+    midpoint_dists: list[float] = []
+    endpoints: list[tuple[int, int]] = []
+    n_segs = 0
+
+    for ln in shape_lines:
+        x0, y0 = ln["x0"], ln["top"]
+        x1, y1 = ln["x1"], ln["bottom"]
+
+        d0 = math.sqrt((x0 - cx) ** 2 + (y0 - cy) ** 2)
+        d1 = math.sqrt((x1 - cx) ** 2 + (y1 - cy) ** 2)
+
+        if d0 <= radius and d1 <= radius:
+            n_segs += 1
+            mx = (x0 + x1) / 2
+            my = (y0 + y1) / 2
+            midpoint_dists.append(math.sqrt((mx - cx) ** 2 + (my - cy) ** 2))
+            # Round to integer for vertex clustering.
+            endpoints.append((round(x0), round(y0)))
+            endpoints.append((round(x1), round(y1)))
+
+    # Count vertices shared by exactly 2 polygon edges.
+    ep_counts = Counter(endpoints)
+    pts_x2 = sum(1 for c in ep_counts.values() if c == 2)
+
+    # Standard deviation of midpoint distances (ring consistency).
+    if len(midpoint_dists) >= 2:
+        mean_d = sum(midpoint_dists) / len(midpoint_dists)
+        var = sum((d - mean_d) ** 2 for d in midpoint_dists) / len(midpoint_dists)
+        std_mid = math.sqrt(var)
+    else:
+        std_mid = 999.0
+
+    return n_segs, pts_x2, std_mid
+
+
+
 def _count_keynote_occurrences(
     pdf_page: Any,
     keynote_numbers: list[str],
     page_width: float,
     page_height: float,
     return_positions: bool = False,
+    viewport_bbox: tuple[float, float, float, float] | None = None,
 ) -> dict[str, int] | tuple[dict[str, int], dict[str, list[dict]]]:
     """Count keynote symbols on the plan using geometric shape detection.
 
@@ -243,11 +330,17 @@ def _count_keynote_occurrences(
     detecting line endpoints that surround each candidate number in
     all four quadrants (top-right, bottom-right, bottom-left, top-left).
 
-    Two-step filtering:
-    1. High-confidence: numbers enclosed in all 4 quadrants (score=4)
-    2. Include score=3 candidates IF their font height matches the
-       modal font height from high-confidence candidates.
+    Three-step filtering:
+    1. Quadrant check: find numbers enclosed in 3+ quadrants.
+    2. Shape quality check (dense pages only): verify that nearby segments
+       form a coherent polygon (closed vertices + consistent midpoint
+       distance).  Shape-verified candidates determine the modal font_h.
+    3. Final filter: quadrants >= 3 AND font_h matches modal.
+
+    When *viewport_bbox* is set, only candidates within the viewport
+    are considered (for multi-viewport page support).
     """
+    import math
     from collections import Counter
 
     counts: dict[str, int] = {n: 0 for n in keynote_numbers}
@@ -271,12 +364,31 @@ def _count_keynote_occurrences(
         result = _count_keynote_text_only(
             words, keynote_numbers, page_width, page_height,
             return_positions=return_positions,
+            viewport_bbox=viewport_bbox,
         )
         return result
 
-    # Filter for candidate keynote numbers in the drawing area.
-    drawing_max_x = page_width * 0.70
-    title_min_y = page_height * 0.90
+    # Compute drawing area boundaries.
+    # When a viewport is set, use viewport-relative coordinates.
+    # Use page.bbox for origin-aware coordinates on non-zero-origin PDFs.
+    if viewport_bbox is not None:
+        vx0, vy0, vx1, vy1 = viewport_bbox
+        vw = vx1 - vx0
+        vh = vy1 - vy0
+        drawing_max_x = vx0 + vw * 0.70
+        title_min_y = vy0 + vh * 0.90
+    else:
+        try:
+            vx0, vy0, vx1, vy1 = pdf_page.bbox
+        except Exception:
+            vx0 = vy0 = 0.0
+            vx1 = page_width
+            vy1 = page_height
+        vw = vx1 - vx0
+        vh = vy1 - vy0
+        drawing_max_x = vx0 + vw * 0.70
+        title_min_y = vy0 + vh * 0.90
+
     kn_set = set(keynote_numbers)
 
     candidates: list[dict[str, Any]] = []
@@ -286,6 +398,10 @@ def _count_keynote_occurrences(
             continue
         cx = (w["x0"] + w["x1"]) / 2
         cy = (w["top"] + w["bottom"]) / 2
+        # Must be inside viewport (if set)
+        if viewport_bbox is not None:
+            if cx < vx0 or cx > vx1 or cy < vy0 or cy > vy1:
+                continue
         if cx > drawing_max_x or cy > title_min_y:
             continue
 
@@ -306,29 +422,83 @@ def _count_keynote_occurrences(
     if not candidates:
         return (counts, positions) if return_positions else counts
 
-    # Step 1: Find modal font_h from high-confidence candidates.
-    high_conf = [c for c in candidates if c["quadrants"] >= 4]
-    if high_conf:
-        font_counts = Counter(c["font_h"] for c in high_conf)
-        modal_font_h = font_counts.most_common(1)[0][0]
-    else:
-        mid_conf = [c for c in candidates if c["quadrants"] >= 3]
-        if mid_conf:
-            font_counts = Counter(c["font_h"] for c in mid_conf)
+    # ── Shape-quality-aware modal font_h detection ──────────────────
+    # On dense pages (>10k lines), the quadrant check alone is unreliable
+    # because wall/equipment lines create false enclosures around bare
+    # numbers.  Use polygon closure analysis to find real geometric shapes
+    # (hexagons, diamonds) and derive the correct modal font_h from those.
+
+    is_dense = len(lines) > 10_000
+    modal_font_h: float | None = None
+
+    if is_dense:
+        # Pre-filter to "shape-length" segments (3–20 pt) for efficiency.
+        shape_lines: list[Any] = []
+        for ln in lines:
+            seg_len = math.sqrt(
+                (ln["x1"] - ln["x0"]) ** 2
+                + (ln["bottom"] - ln["top"]) ** 2
+            )
+            if 3.0 <= seg_len <= 20.0:
+                shape_lines.append(ln)
+
+        logger.debug(
+            "Dense page: %d total lines, %d shape-length lines, "
+            "%d candidates with quad>=3",
+            len(lines), len(shape_lines),
+            sum(1 for c in candidates if c["quadrants"] >= 3),
+        )
+
+        # Compute shape quality for candidates passing quadrant check.
+        shape_verified: list[dict] = []
+        for c in candidates:
+            if c["quadrants"] < 3:
+                continue
+            segs, x2, std = _check_shape_quality(
+                c["cx"], c["cy"], shape_lines,
+            )
+            c["shape_segs"] = segs
+            c["pts_x2"] = x2
+            c["std_mid"] = std
+            # Real polygon: 4–12 edges, >=2 shared vertices, tight ring.
+            # std < 2.0 separates real hexagons/diamonds (std ~0.7–1.5)
+            # from false positives near structured wiring (std ~2.0–3.0).
+            if 4 <= segs <= 12 and x2 >= 2 and std < 2.0:
+                shape_verified.append(c)
+
+        if len(shape_verified) >= 2:
+            font_counts = Counter(c["font_h"] for c in shape_verified)
+            modal_font_h = font_counts.most_common(1)[0][0]
+            logger.debug(
+                "Shape-verified modal font_h=%.1f from %d verified candidates",
+                modal_font_h, len(shape_verified),
+            )
+
+    # Fallback: standard quadrant-based modal font_h (works on clean pages).
+    if modal_font_h is None:
+        high_conf = [c for c in candidates if c["quadrants"] >= 4]
+        if high_conf:
+            font_counts = Counter(c["font_h"] for c in high_conf)
             modal_font_h = font_counts.most_common(1)[0][0]
         else:
-            # No geometric shapes detected — fall back to text-only.
-            logger.debug(
-                "No geometric keynote shapes detected — "
-                "falling back to text-only counting"
-            )
-            result = _count_keynote_text_only(
-                words, keynote_numbers, page_width, page_height,
-                return_positions=return_positions,
-            )
-            return result
+            mid_conf = [c for c in candidates if c["quadrants"] >= 3]
+            if mid_conf:
+                font_counts = Counter(c["font_h"] for c in mid_conf)
+                modal_font_h = font_counts.most_common(1)[0][0]
+            else:
+                # No geometric shapes detected — fall back to text-only.
+                logger.debug(
+                    "No geometric keynote shapes detected — "
+                    "falling back to text-only counting"
+                )
+                result = _count_keynote_text_only(
+                    words, keynote_numbers, page_width, page_height,
+                    return_positions=return_positions,
+                    viewport_bbox=viewport_bbox,
+                )
+                return result
 
-    # Step 2: Count candidates with >= 3 quadrants AND matching font_h.
+    # ── Final filter: quadrants >= 3 AND matching font_h ────────────
     for c in candidates:
         if c["quadrants"] >= 3 and c["font_h"] == modal_font_h:
             counts[c["text"]] += 1
@@ -351,20 +521,37 @@ def _count_keynote_text_only(
     page_width: float,
     page_height: float,
     return_positions: bool = False,
+    viewport_bbox: tuple[float, float, float, float] | None = None,
 ) -> dict[str, int] | tuple[dict[str, int], dict[str, list[dict]]]:
     """Fallback: count keynote numbers by text matching only.
 
     Used when no geometric line data is available on the page.
+    When *viewport_bbox* is set, only words within the viewport are counted.
     """
     counts: dict[str, int] = {n: 0 for n in keynote_numbers}
     positions: dict[str, list[dict]] = {n: [] for n in keynote_numbers}
     kn_set = set(keynote_numbers)
-    drawing_max_x = page_width * 0.70
-    title_min_y = page_height * 0.90
+
+    if viewport_bbox is not None:
+        vx0, vy0, vx1, vy1 = viewport_bbox
+        vw = vx1 - vx0
+        vh = vy1 - vy0
+        drawing_max_x = vx0 + vw * 0.70
+        title_min_y = vy0 + vh * 0.90
+    else:
+        vx0 = vy0 = 0.0
+        vx1 = page_width
+        vy1 = page_height
+        drawing_max_x = page_width * 0.70
+        title_min_y = page_height * 0.90
 
     for w in words:
         cx = (w["x0"] + w["x1"]) / 2
         cy = (w["top"] + w["bottom"]) / 2
+        # Must be inside viewport
+        if viewport_bbox is not None:
+            if cx < vx0 or cx > vx1 or cy < vy0 or cy > vy1:
+                continue
         if cx > drawing_max_x or cy > title_min_y:
             continue
         text = w["text"].strip()
@@ -407,8 +594,8 @@ def _find_keynotes_header_x(words: list[Any]) -> float | None:
                         and nw["x0"] - w["x1"] < 30):
                     if "NOTE" in nw["text"].upper():
                         return w["x0"]
-                    if "SHEET" in nw["text"].upper():
-                        # "KEYED SHEET NOTES" — keep looking
+                    if nw["text"].upper().strip() in ("SHEET", "PLAN"):
+                        # "KEYED SHEET NOTES" / "KEYED PLAN NOTES" — keep looking
                         continue
                 else:
                     break
@@ -430,7 +617,10 @@ def _has_keynote_content(text: str) -> bool:
     return bool(strict_entry.search(text))
 
 
-def _extract_keynotes_region_text(pdf_page: Any) -> str:
+def _extract_keynotes_region_text(
+    pdf_page: Any,
+    viewport_bbox: tuple[float, float, float, float] | None = None,
+) -> str:
     """Extract text from the keynotes region of the page.
 
     Uses a two-stage approach:
@@ -441,17 +631,37 @@ def _extract_keynotes_region_text(pdf_page: Any) -> str:
        position cannot be determined or the tight crop misses entries.
 
     Falls back to full-page text if no cropped region yields keynotes.
+
+    When *viewport_bbox* is set, all crops are relative to the viewport
+    bounding box instead of the full page.
     """
     width = pdf_page.width
     height = pdf_page.height
 
+    if viewport_bbox is not None:
+        vx0, vy0, vx1, vy1 = viewport_bbox
+        vw = vx1 - vx0
+        vh = vy1 - vy0
+    else:
+        # Use page.bbox for origin-aware coordinates
+        vx0, vy0, vx1, vy1 = pdf_page.bbox
+        vw = vx1 - vx0
+        vh = vy1 - vy0
+
     # Stage 1: Header-aware tight crop
     try:
         words = pdf_page.extract_words(x_tolerance=3, y_tolerance=3)
+        # Filter words to viewport if set
+        if viewport_bbox is not None:
+            words = [
+                w for w in words
+                if w["x0"] >= vx0 and w["x1"] <= vx1
+                and w["top"] >= vy0 and w["bottom"] <= vy1
+            ]
         header_x = _find_keynotes_header_x(words)
         if header_x is not None:
-            crop_left = max(0, header_x - 30)
-            bbox = (crop_left, 0, width, height * 0.85)
+            crop_left = max(vx0, header_x - 30)
+            bbox = (crop_left, vy0, vx1, vy0 + vh * 0.85)
             try:
                 cropped = pdf_page.within_bbox(bbox)
                 text = cropped.extract_text() or ""
@@ -469,9 +679,9 @@ def _extract_keynotes_region_text(pdf_page: Any) -> str:
 
     # Stage 2: Fixed right-side crop (fallback)
     regions = [
-        (width * 0.70, 0, width, height * 0.85),    # Right 30%, top 85%
-        (width * 0.65, 0, width, height * 0.85),    # Right 35%, top 85%
-        (width * 0.60, 0, width, height * 0.80),    # Right 40%, top 80%
+        (vx0 + vw * 0.70, vy0, vx1, vy0 + vh * 0.85),    # Right 30%, top 85%
+        (vx0 + vw * 0.65, vy0, vx1, vy0 + vh * 0.85),    # Right 35%, top 85%
+        (vx0 + vw * 0.60, vy0, vx1, vy0 + vh * 0.80),    # Right 40%, top 80%
     ]
 
     for bbox in regions:
@@ -489,7 +699,13 @@ def _extract_keynotes_region_text(pdf_page: Any) -> str:
             )
             return text
 
-    # Fallback: use full page text
+    # Fallback: use full viewport/page text
+    if viewport_bbox is not None:
+        try:
+            cropped = pdf_page.within_bbox(viewport_bbox)
+            return cropped.extract_text() or ""
+        except Exception:
+            pass
     try:
         return pdf_page.extract_text() or ""
     except Exception:
@@ -527,8 +743,10 @@ def extract_keynotes_from_plan(
     sheet = page_info.sheet_code or f"page_{page_info.page_number}"
     logger.info("Extracting keynotes from plan %s", sheet)
 
+    viewport_bbox = page_info.viewport_bbox
+
     try:
-        region_text = _extract_keynotes_region_text(pdf_page)
+        region_text = _extract_keynotes_region_text(pdf_page, viewport_bbox=viewport_bbox)
     except Exception as exc:
         raise KeyNoteExtractionError(
             f"Failed to extract text from plan {sheet}: {exc}"
@@ -540,6 +758,21 @@ def extract_keynotes_from_plan(
 
     # Find the keynotes section.
     section_text = _find_keynotes_section(region_text)
+
+    # For viewport sub-plans, the shared KEYED NOTES panel may sit outside
+    # the viewport bbox (e.g., at the far right of the full page).  If the
+    # viewport-scoped search found nothing, retry with the full page.
+    if section_text is None and viewport_bbox is not None:
+        logger.debug(
+            "No keynotes in viewport bbox for %s — retrying with full page",
+            sheet,
+        )
+        try:
+            full_text = _extract_keynotes_region_text(pdf_page, viewport_bbox=None)
+            section_text = _find_keynotes_section(full_text)
+        except Exception:
+            pass
+
     if section_text is None:
         logger.debug("No keynotes section found on plan %s", sheet)
         return (keynotes, counts, kn_positions) if return_positions else (keynotes, counts)
@@ -581,6 +814,7 @@ def extract_keynotes_from_plan(
     count_result = _count_keynote_occurrences(
         pdf_page, keynote_numbers, page_width, page_height,
         return_positions=return_positions,
+        viewport_bbox=viewport_bbox,
     )
     if return_positions and isinstance(count_result, tuple):
         counts, kn_positions = count_result
@@ -610,6 +844,171 @@ def extract_keynotes_from_plan(
     return keynotes, counts
 
 
+def _process_single_plan(
+    page_info: PageInfo,
+    pdf_page: Any,
+    known_fixture_codes: list[str] | None,
+    return_positions: bool,
+) -> tuple[list[KeyNote], dict[str, int], dict[str, list[dict]] | None]:
+    """Process keynotes for a single (non-viewport-group) plan page.
+
+    Returns (keynotes, counts, positions_or_None).
+    """
+    raw = extract_keynotes_from_plan(
+        page_info, pdf_page, known_fixture_codes,
+        return_positions=return_positions,
+    )
+    if return_positions and len(raw) == 3:
+        return raw[0], raw[1], raw[2]
+    return raw[0], raw[1], None
+
+
+def _process_viewport_group(
+    sibling_pages: list[PageInfo],
+    pdf_pages: dict[int, Any],
+    known_fixture_codes: list[str] | None,
+    return_positions: bool,
+) -> tuple[list[KeyNote], dict[str, dict[str, int]], dict[str, dict] | None]:
+    """Process keynotes for a group of viewport siblings sharing one page.
+
+    Keynote TEXT is extracted once from the full (unclipped) page since the
+    shared KEYED NOTES panel sits outside individual viewport bboxes.
+    Keynote COUNTING is done per-viewport using each viewport's bbox.
+
+    Returns (keynotes, {sheet: counts}, positions_dict_or_None).
+    """
+    # All siblings share the same physical page.
+    first = sibling_pages[0]
+    pdf_page = pdf_pages.get(first.page_number)
+    if pdf_page is None:
+        sheet_codes = [p.sheet_code for p in sibling_pages]
+        logger.warning("No PDF page for viewport group %s", sheet_codes)
+        empty_counts = {
+            (p.sheet_code or f"page_{p.page_number}"): {}
+            for p in sibling_pages
+        }
+        return [], empty_counts, {} if return_positions else None
+
+    page_width = pdf_page.width
+    page_height = pdf_page.height
+
+    # 1. Extract keynote TEXT once from full page (no viewport clipping).
+    try:
+        full_text = _extract_keynotes_region_text(pdf_page, viewport_bbox=None)
+    except Exception as exc:
+        logger.warning("Failed to extract keynote text for viewport group: %s", exc)
+        empty_counts = {
+            (p.sheet_code or f"page_{p.page_number}"): {}
+            for p in sibling_pages
+        }
+        return [], empty_counts, {} if return_positions else None
+
+    section_text = _find_keynotes_section(full_text)
+    if section_text is None:
+        logger.debug("No keynotes section in viewport group (parent=%s)", first.parent_sheet_code)
+        empty_counts = {
+            (p.sheet_code or f"page_{p.page_number}"): {}
+            for p in sibling_pages
+        }
+        return [], empty_counts, {} if return_positions else None
+
+    entries = _parse_keynote_entries(section_text)
+    if not entries:
+        logger.debug("Keynotes header found but no entries in viewport group")
+        empty_counts = {
+            (p.sheet_code or f"page_{p.page_number}"): {}
+            for p in sibling_pages
+        }
+        return [], empty_counts, {} if return_positions else None
+
+    # Deduplicate entries by keynote number.
+    seen_nums: dict[str, int] = {}
+    deduped: list[tuple[str, str]] = []
+    for num, text in entries:
+        if num in seen_nums:
+            idx = seen_nums[num]
+            if len(text) > len(deduped[idx][1]):
+                deduped[idx] = (num, text)
+        else:
+            seen_nums[num] = len(deduped)
+            deduped.append((num, text))
+    entries = deduped
+
+    keynote_numbers = [num for num, _ in entries]
+
+    # 2. Count keynote symbols PER VIEWPORT using each viewport's bbox.
+    group_counts: dict[str, dict[str, int]] = {}
+    group_positions: dict[str, dict] = {} if return_positions else None
+    combined_counts: dict[str, dict[str, int]] = {}  # {kn_number: {sheet: count}}
+
+    for page_info in sibling_pages:
+        sheet = page_info.sheet_code or f"page_{page_info.page_number}"
+        viewport_bbox = page_info.viewport_bbox
+
+        count_result = _count_keynote_occurrences(
+            pdf_page, keynote_numbers, page_width, page_height,
+            return_positions=return_positions,
+            viewport_bbox=viewport_bbox,
+        )
+        if return_positions and isinstance(count_result, tuple):
+            vp_counts, vp_positions = count_result
+            # Normalize to (0,0)-origin image space.
+            bbox = tuple(pdf_page.bbox)
+            ox, oy = bbox[0], bbox[1]
+            if ox != 0.0 or oy != 0.0:
+                norm_pos: dict[str, list[dict]] = {}
+                for kn_num, pos_list in vp_positions.items():
+                    norm_pos[kn_num] = [
+                        {
+                            "x0": p["x0"] - ox, "top": p["top"] - oy,
+                            "x1": p["x1"] - ox, "bottom": p["bottom"] - oy,
+                            "cx": p["cx"] - ox, "cy": p["cy"] - oy,
+                        }
+                        for p in pos_list
+                    ]
+                vp_positions = norm_pos
+            group_positions[sheet] = {
+                "page_width": page_width,
+                "page_height": page_height,
+                "keynotes": vp_positions,
+            }
+        else:
+            vp_counts = count_result
+
+        group_counts[sheet] = vp_counts
+
+        for num in keynote_numbers:
+            combined_counts.setdefault(num, {})[sheet] = vp_counts.get(num, 0)
+
+    # 3. Build ONE KeyNote per number with combined counts_per_plan.
+    keynotes: list[KeyNote] = []
+    for num, text in entries:
+        refs = _find_fixture_references(text, known_fixture_codes)
+        counts_per_plan = combined_counts.get(num, {})
+        total = sum(counts_per_plan.values())
+        keynotes.append(KeyNote(
+            number=num,
+            text=text,
+            counts_per_plan=counts_per_plan,
+            total=total,
+            fixture_references=refs,
+        ))
+        if total > 0:
+            logger.debug(
+                "Viewport group: keynote %s total=%d (%s)",
+                num, total, counts_per_plan,
+            )
+
+    logger.info(
+        "Extracted %d keynotes for viewport group (parent=%s, siblings=%s)",
+        len(keynotes),
+        first.parent_sheet_code,
+        [p.sheet_code for p in sibling_pages],
+    )
+
+    return keynotes, group_counts, group_positions
+
+
 def extract_all_keynotes(
     plan_pages: list[PageInfo],
     pdf_pages: dict[int, Any],
@@ -618,9 +1017,10 @@ def extract_all_keynotes(
 ) -> tuple[list[KeyNote], dict[str, dict[str, int]]] | tuple[list[KeyNote], dict[str, dict[str, int]], dict]:
     """Extract keynotes from all plan pages.
 
-    Each page's keynotes are kept as separate entries — keynotes with
-    the same number but different text on different pages are NOT merged,
-    since each plan sheet can have its own set of keynotes.
+    Viewport siblings (pages sharing the same ``parent_sheet_code``) are
+    processed as a group: keynote text is extracted once from the shared
+    notes panel, and symbol counting is done per-viewport.  Non-viewport
+    pages are processed individually.
 
     Args:
         plan_pages: List of page metadata for lighting plan pages.
@@ -640,7 +1040,35 @@ def extract_all_keynotes(
     all_counts: dict[str, dict[str, int]] = {}
     all_positions: dict[str, dict] = {}
 
-    for page_info in plan_pages:
+    # Group pages: viewport siblings share parent_sheet_code, others are solo.
+    viewport_groups: dict[str, list[PageInfo]] = {}
+    solo_pages: list[PageInfo] = []
+    for pi in plan_pages:
+        if pi.parent_sheet_code:
+            viewport_groups.setdefault(pi.parent_sheet_code, []).append(pi)
+        else:
+            solo_pages.append(pi)
+
+    # Process viewport sibling groups.
+    for parent_code, siblings in viewport_groups.items():
+        try:
+            kn_list, grp_counts, grp_pos = _process_viewport_group(
+                siblings, pdf_pages, known_fixture_codes, return_positions,
+            )
+        except KeyNoteExtractionError:
+            logger.exception("Error extracting keynotes for viewport group %s", parent_code)
+            for pi in siblings:
+                sheet = pi.sheet_code or f"page_{pi.page_number}"
+                all_counts[sheet] = {}
+            continue
+
+        all_keynotes.extend(kn_list)
+        all_counts.update(grp_counts)
+        if return_positions and grp_pos:
+            all_positions.update(grp_pos)
+
+    # Process solo (non-viewport) pages.
+    for page_info in solo_pages:
         sheet = page_info.sheet_code or f"page_{page_info.page_number}"
         pdf_page = pdf_pages.get(page_info.page_number)
         if pdf_page is None:
@@ -656,27 +1084,37 @@ def extract_all_keynotes(
             continue
 
         try:
-            raw = extract_keynotes_from_plan(
-                page_info, pdf_page, known_fixture_codes,
-                return_positions=return_positions,
+            page_kn, page_counts, page_pos = _process_single_plan(
+                page_info, pdf_page, known_fixture_codes, return_positions,
             )
         except KeyNoteExtractionError:
             logger.exception("Error extracting keynotes from plan %s", sheet)
             all_counts[sheet] = {}
             continue
 
-        if return_positions and len(raw) == 3:
-            page_keynotes, page_counts, page_positions = raw
+        all_counts[sheet] = page_counts
+        all_keynotes.extend(page_kn)
+        if return_positions and page_pos is not None:
+            # Normalize to (0,0)-origin image space.
+            bbox = tuple(pdf_page.bbox)
+            ox, oy = bbox[0], bbox[1]
+            if ox != 0.0 or oy != 0.0:
+                norm_pos_solo: dict[str, list[dict]] = {}
+                for kn_num, pos_list in page_pos.items():
+                    norm_pos_solo[kn_num] = [
+                        {
+                            "x0": p["x0"] - ox, "top": p["top"] - oy,
+                            "x1": p["x1"] - ox, "bottom": p["bottom"] - oy,
+                            "cx": p["cx"] - ox, "cy": p["cy"] - oy,
+                        }
+                        for p in pos_list
+                    ]
+                page_pos = norm_pos_solo
             all_positions[sheet] = {
                 "page_width": pdf_page.width,
                 "page_height": pdf_page.height,
-                "keynotes": page_positions,
+                "keynotes": page_pos,
             }
-        else:
-            page_keynotes, page_counts = raw[0], raw[1]
-
-        all_counts[sheet] = page_counts
-        all_keynotes.extend(page_keynotes)
 
     # Sort by sheet (plan order), then by keynote number.
     all_sheets = [

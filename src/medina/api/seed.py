@@ -254,6 +254,7 @@ def seed_dashboard() -> None:
             entry = {
                 "id": project_id,
                 "name": project_data["project_name"],
+                "tenant_id": "default",
                 "approved_at": now,
                 "fixture_types": project_data["summary"]["total_fixture_types"],
                 "total_fixtures": project_data["summary"]["total_fixtures"],

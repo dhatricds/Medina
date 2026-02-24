@@ -155,6 +155,7 @@ A structured JSON file for web frontend display, with the same data organized fo
       "cct": "4000K",
       "dimming": "DIMMING 0-10V",
       "max_va": "50 VA",
+      "schedule_page": "E600",
       "counts_per_plan": {"E200": 46},
       "total": 46
     }
@@ -323,7 +324,7 @@ Medina/
 │           ├── layout/          # TopBar, BottomBar, ThreePanel
 │           ├── pdf/             # UploadZone, PdfViewer
 │           ├── agents/          # AgentPipeline, AgentCard
-│           ├── tables/          # TabContainer, FixtureTable, KeynoteTable, EditableCell
+│           ├── tables/          # TabContainer, FixtureTable, KeynoteTable, EditableCell, FixItPanel
 │           ├── qa/              # WarningModal
 │           ├── upload/          # SourcePicker
 │           └── dashboard/       # DashboardView (card grid), DashboardDetail (project detail)
@@ -352,7 +353,8 @@ Medina/
 │       │   ├── text_counter.py  # Fixture counting + schedule table & crossref filtering
 │       │   ├── vision_counter.py# Fixture counting via Claude vision API
 │       │   ├── keynotes.py      # Key notes extraction + geometric shape detection
-│       │   └── vision_keynote_counter.py  # VLM fallback for keynote counting
+│       │   ├── vision_keynote_counter.py  # VLM fallback for keynote counting
+│       │   └── viewport_detector.py  # Multi-viewport detection + page splitting
 │       ├── qa/
 │       │   ├── __init__.py
 │       │   ├── validator.py     # Cross-check and validate extraction results
@@ -371,6 +373,8 @@ Medina/
 │       │   ├── orchestrator_wrapper.py  # Wraps agent runs with SSE events + learning
 │       │   ├── feedback.py      # Feedback models, persistence, hint derivation
 │       │   ├── learnings.py     # Global learning store (persistent cross-session)
+│       │   ├── fix_it.py        # LLM-powered natural language correction interpreter
+│       │   ├── patterns.py      # Global pattern detection across learnings
 │       │   └── routes/
 │       │       ├── sources.py   # GET /api/sources (list data/ folder)
 │       │       ├── upload.py    # POST /api/upload (single/multi-file)
@@ -380,6 +384,7 @@ Medina/
 │       │       ├── export.py    # GET /api/projects/{id}/export/excel
 │       │       ├── corrections.py # PATCH /api/projects/{id}/corrections
 │       │       ├── feedback.py  # POST/GET/DELETE feedback, POST reprocess
+│       │       ├── fix_it.py    # POST interpret + confirm (LLM Fix It flow)
 │       │       ├── demo.py      # GET /api/demo/{name}
 │       │       └── dashboard.py # Dashboard CRUD: list, approve, detail, export, delete
 │       └── team/                # Expert Contractor Agent Team
@@ -470,7 +475,7 @@ uv run python -m medina.team.run_qa data/24031_15_Elec.pdf output/work_dir outpu
 
 | Project | Fixtures | Keynotes | QA | Time |
 |---------|----------|----------|-----|------|
-| HCMC (24031_15_Elec) | 13 types, 125 total | #1=6, #2=1, #3=1 | 98.0% PASS | ~85s |
+| HCMC (24031_15_Elec) | 13 types, 124 total | #1=6, #2=1, #3=1 | 98.0% PASS | ~85s |
 | Anoka Dispensary | 10 types, 59 total | #1=4, #2=1 | 97.0% PASS | ~43s |
 | DENIS-1266 (VLM) | 14 types, 32 total (14/14 exact) | 10 keynotes, 9/10 per-plan match | 93.4% | ~85s |
 
@@ -518,6 +523,7 @@ class FixtureRecord(BaseModel):
     cct: str
     dimming: str
     max_va: str
+    schedule_page: str = ""                 # sheet code of schedule page this fixture was extracted from
     counts_per_plan: dict[str, int] = {}   # {sheet_code: count} e.g. {"E1A": 8, "E1B": 6}
     total: int = 0                          # Sum of all plan counts
 
@@ -709,7 +715,7 @@ Each lighting plan page is processed **independently**. Results are stored as `{
   3. Two-step filtering: first find the modal `font_h` from high-confidence candidates (4/4 quadrants), then count all candidates with >= 3 quadrants AND matching `font_h`
   4. This eliminates false positives from circuit numbers, room numbers, and dimensions
 - **Fallback: text-only counting** — regex-based pattern matching when no lines are present on the page
-- **VLM fallback (`plans/vision_keynote_counter.py`)** — only triggered when geometric detection finds ALL ZERO counts for a plan page. Sends two cropped images (legend area + drawing area) to Claude Vision API
+- **VLM fallback (`plans/vision_keynote_counter.py`)** — triggered when geometric detection finds ALL ZERO counts for a plan page OR when any single keynote count exceeds 10 (suspiciously high, indicates false positives from dense line geometry). Sends two cropped images (legend area + drawing area) to Claude Vision API
 - Return `dict[str, int]` per plan (keynote_number → count on this page)
 - Parse for fixture code references within keynote text
 
@@ -929,7 +935,7 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 ### Validated Projects (Training Set)
 | Project | Type | Plans | Schedules | Fixtures | Keynotes | QA | Notes |
 |---------|------|-------|-----------|----------|----------|-----|-------|
-| HCMC (24031_15_Elec.pdf) | Single PDF | E200 | E600 | 13 types, 125 total | #1=6,#2=1,#3=1 | 98% Pass | 11/12 exact match (B6 +1) |
+| HCMC (24031_15_Elec.pdf) | Single PDF | E200 | E600 | 13 types, 124 total | #1=6,#2=1,#3=1 | 98% Pass | 12/12 exact match |
 | DENIS 11CD | Single PDF | E101-E103 | - | 0 (no schedule) | 0 | - | 3 plans correctly identified |
 | DENIS 1220 | Single PDF | E2.2 | E4.1 | 2 types (R1=11,S3=30) | #1=1,#2=6,#3=1,#4=3 | - | All exact match |
 | DENIS 12E2 | Single PDF | E1.1, E1.2 | E4.1, E4.2 | 5 types (A6=45,B1=2,D6=8,E1=2,F4=0) | - | - | All types match GT |
@@ -943,7 +949,7 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 | A1 | 48 | 48 | Match |
 | A6 | 14 | 14 | Match |
 | B1 | 4 | 4 | Match |
-| B6 | 26 | 25 | +1 |
+| B6 | 25 | 25 | Match |
 | C4 | 1 | 1 | Match |
 | D6 | 8 | N/A | Extra type in schedule |
 | D7 | 1 | 1 | Match |
@@ -954,7 +960,7 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 | U3 | 7 | 7 | Match |
 | U4 | 4 | 4 | Match |
 
-**11/12 exact matches** (was 9/12 before char-level fix). Remaining: B6 +1.
+**12/12 exact matches** (was 9/12 before char-level fix, 11/12 after, now all match).
 
 #### Anoka Fixture Count Detail (after legend-column exclusion fix)
 | Code | Pipeline | Ground Truth | Delta |
@@ -996,6 +1002,25 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 - **Keynote false positives (FIXED)**: Max keynote number reduced from 99 to 20 to reject false positives from addresses/notes. Per-page dedup added — duplicate keynote numbers within same page are merged (keeps longer text).
 - **QA zero-count penalty too harsh (FIXED)**: Reduced from -30% per fixture + -3% overall to -10% per fixture + -1% overall. Schedules often include alternates/spares not used on project's plans.
 
+### Multi-Viewport Sub-Plan Support
+- **Bug fix**: Count/keynote agents now read PageInfo from `search_result.json` instead of re-classifying pages from scratch. This preserves Fix It page overrides that were being lost.
+- **Multi-viewport detection** (`src/medina/plans/viewport_detector.py`): Auto-detects pages with multiple lighting viewports (e.g., "Level 1" + "Mezzanine" on one sheet). Scans bottom 15% of page (excluding title block area) for lighting plan titles.
+- **Same-line title splitting**: `_split_line_by_x_gap()` splits viewport titles at horizontal gaps >3% of page width, handling cases where all titles share the same y-position (e.g., DENIS-0112 E601 has 4 titles at y=1808).
+- **Non-lighting viewport boundary**: Power/systems viewport positions are tracked so the rightmost lighting viewport boundary is the midpoint to the nearest power viewport (not the full page width).
+- **Separation threshold**: Minimum 10% page-width horizontal separation between viewport centers (supports 4-viewport pages where each is ~25% wide).
+- **Viewport splitting**: When 2+ lighting viewports detected, the page is split into virtual PageInfo objects with composite sheet codes (e.g., `E601-L1`, `E601-MEZ`), each with a `viewport_bbox` that clips counting to just that portion.
+- **Viewport-aware counting**: `text_counter.py`, `keynotes.py`, `vision_counter.py`, and `vision_keynote_counter.py` all respect `viewport_bbox` — exclusion zones computed relative to viewport, characters outside viewport are skipped, VLM images cropped to viewport.
+- **Viewport sibling keynote processing**: Pages sharing `parent_sheet_code` are processed as a group — keynote TEXT is extracted once from the full page (shared notes panel), keynote COUNTING is done per-viewport using each viewport's bbox. Produces one KeyNote per number with combined `counts_per_plan`.
+- **Full-page fallback for viewport keynotes**: When the shared KEYED NOTES panel sits outside the viewport bbox, the extraction retries with full-page text.
+- **VLM legend crop**: `vision_keynote_counter.py` uses full-page image for legend crop and viewport-cropped image for drawing crop, ensuring the shared notes panel is visible.
+- **Fix It `split_page` action**: Contractors can say "E601 has two lighting plans Level 1 and Mezzanine" → LLM returns `split_page` action → auto-detect or user-provided viewport boundaries → reprocess with separate columns.
+- **Graceful bbox fallback**: When stored viewport hints lack `bbox`, `run_search.py` falls through to auto-detect instead of failing with Pydantic validation error.
+- **Persistent via learnings**: Viewport splits are stored in `FeedbackHints.viewport_splits` and persisted through the learnings system. Future runs of the same source auto-apply the splits.
+- **`viewport_map`** in JSON output: Maps composite keys to physical page numbers for frontend PDF navigation.
+- **Validated on DENIS-0112**: E601 correctly splits into E601-L1 (Level 1) and E601-MEZ (Mezzanine), power/systems viewports excluded. 16 keynotes extracted from shared panel with per-viewport counts.
+- **Regression tested**: All 5 training PDFs + DENIS-00C6 produce identical results (no false viewport splits on existing test files).
+- **Dense page VLM high-count trigger**: On very dense pages (>100k lines like DENIS-0112), geometric keynote counting can produce inflated counts for bare numbers that pass the 4-quadrant check. Fixed by adding `_MAX_PLAUSIBLE_KEYNOTE_COUNT = 10` in `run_keynote.py` — when any single keynote count exceeds 10, VLM verification is triggered for that plan. Endpoint density filtering was attempted but abandoned — valid keynotes in dense areas also have high endpoint counts (up to 89 on HCMC).
+
 ### In Progress (Agent Team Validation)
 - **Elk River Gym** (folder input, 2 plans after dedup) — schedule on combo page, 2 fixture types (G18, G22), 3 keynotes. Testing cross-ref filtering.
 - **Johanna Fire** (folder, 4 lighting plans) — 28 fixture types, fixture codes overlap with sheet codes (E1A, E1B, E2A, E2B). Testing cross-reference filtering.
@@ -1005,7 +1030,7 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 ### Key Technical Decisions
 1. **Geometric shape detection over VLM for keynotes**: After extensive testing (7+ VLM prompt iterations), pdfplumber line geometry proved far more reliable than Claude Vision for counting small diamond-enclosed numbers. VLM is inconsistent (0 to 24 for same image across runs). Geometric detection gives exact match.
 2. **Title block before prefix rules**: Title block content is the page's own self-description, making it more reliable than code prefixes which are ambiguous (E2xx could be lighting, power, or site plan).
-3. **VLM as fallback only**: VLM keynote counting only triggers when text-based geometric detection finds all zeros for a plan page. Prevents VLM from overriding correct text-based counts.
+3. **VLM as fallback only**: VLM keynote counting triggers when (a) text-based geometric detection finds all zeros for a plan page, or (b) any single keynote count exceeds 10 (suspiciously high — indicates false positives from dense line geometry). Prevents VLM from overriding correct text-based counts while catching inflated counts on dense pages.
 4. **DPI limits for API calls**: Schedule VLM uses 150 DPI max (stays under 5MB base64 limit). Keynote VLM uses 200 DPI. Fixture vision counter uses 150 DPI (8000px API limit).
 5. **Schedule table exclusion by keyword scoring**: On combo pages, `find_tables()` returns many tables (line grids, notes boxes, etc.). Only the table whose header row has the most luminaire keywords (≥3 of: MARK, LUMINAIRE, FIXTURE, LAMP, LUMEN, VOLTAGE, MOUNTING, WATT) is excluded. Checking only row 0 (not data rows) prevents false matches from notes sections that mention fixtures.
 6. **Cross-reference filtering for sheet-code fixtures**: When a fixture code matches a plan sheet code (e.g., E1A), per-word matching checks preceding words for cross-reference indicators. Concatenated-text matching is disabled for these codes since context can't be checked in a flat string.
@@ -1013,6 +1038,11 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 8. **Smart agent skipping**: The API orchestrator wrapper skips count and keynote agents when there's nothing to process. If no lighting plans found → skip both. If plans exist but no fixture codes → skip count, still run keynotes. Empty result JSON files are written so the QA agent can still read them.
 9. **Global learning store over per-project feedback**: User corrections are promoted to a persistent learning store (`output/learnings/`) indexed by source file identity. On every pipeline run (fresh or reprocess), learnings are auto-loaded and merged with any explicit feedback. This ensures corrections made once are never forgotten across sessions or projects using the same source.
 10. **`is_reprocess` flag vs `hints` check for search caching**: Since hints can come from learnings on fresh runs (not just reprocessing), the search-cache skip uses a dedicated `is_reprocess` flag rather than checking `hints is not None`. This prevents skipping the search agent on first-ever runs that happen to have learnings.
+11. **LLM interpretation over structured forms for corrections**: Natural language via Claude Sonnet is more flexible than rigid form inputs for contractor corrections. The two-step interpret→confirm flow lets users verify the LLM's understanding before committing. Context includes full page listing, fixture inventory, and keynotes so the LLM can resolve references like "E601" or "page 5".
+12. **Deterministic pattern detection over LLM**: Global patterns are detected via Python grouping/counting (not LLM) for reproducibility and zero API cost. Threshold of 3 unique sources prevents premature generalization from a single project.
+13. **Search cache invalidation on page overrides**: When `reclassify_page` corrections are present, the search agent must re-run (no cache) because page classifications have changed. This is checked via `has_page_overrides` flag independent of `is_reprocess`.
+14. **Multi-viewport auto-detection with conservative guards**: Auto-detect scans bottom 15% (excluding rightmost 25% title block) for lighting plan titles. Requires minimum 20% page-width horizontal separation between viewport centers to avoid false positives from title block text appearing twice (e.g., "LIGHTING PLAN" in both the footer and the title block box). Empty `viewport_splits[]` sentinel in hints triggers auto-detection.
+15. **Count/keynote agents read from search_result.json**: Instead of re-loading and re-classifying pages (which loses Fix It page overrides), agents reconstruct PageInfo objects from the cached search result. Only PDF page objects are re-loaded for pdfplumber access.
 
 ## Known Challenges
 
@@ -1030,6 +1060,7 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 12. **Fixture text-counting overcounting** — PARTIALLY SOLVED: Schedule table exclusion for combo pages and cross-reference filtering for sheet-code fixtures. Short code overcounting (Anoka: A=17 vs GT 14) still open — needs tighter spatial filtering or vision fallback.
 13. **Combo page schedule extraction** — SOLVED: `run_schedule.py` checks plan pages for embedded schedule tables. `text_counter.py` detects and excludes luminaire schedule table bounding boxes from fixture counting.
 14. **Folder addendum deduplication** — SOLVED: `loader.py` reads title-block sheet codes and keeps only the latest revision when multiple files share the same sheet code.
+15. **Multi-viewport (enlarged) plan pages** — SOLVED: Auto-detection of side-by-side lighting viewports via title text analysis in bottom 15%. Spatial clipping ensures each viewport gets independent fixture/keynote counts. User can also trigger splits via Fix It. Persistent via learnings system.
 
 ## Dependencies
 
@@ -1105,6 +1136,11 @@ Open http://127.0.0.1:3000 in browser.
 - **Scrollable at zoom**: When zoomed past 100%, the container scrolls to pan around the page.
 - Page navigation arrows for prev/next page with sheet code label.
 
+### Fixture Table Navigation
+- **Type cell click → schedule page**: Clicking a fixture code in the Type column navigates the PDF viewer to the schedule page where that fixture was defined. Uses per-fixture `schedule_page` field (set during extraction), falls back to `schedule_pages[0]`. Only enabled when schedule pages exist.
+- **Count cell click → plan page**: Clicking the Locate button on a count cell navigates to the plan page and highlights fixture positions (existing behavior, unchanged).
+- **UX logic**: Type = definition (schedule page), Count = occurrence (plan page).
+
 ### No-Results Messaging
 - When processing completes but **no schedules AND no lighting plans** are found, the right panel shows an informative warning with possible reasons (wrong PDF type, classification failure, unrecognized schedule format, scanned/image-only PDF).
 - When **no schedules** are found but lighting plans exist, a separate message explains that fixture types cannot be determined without a schedule page.
@@ -1179,7 +1215,7 @@ User corrects fixture table (UI)
 **Feedback Models (`src/medina/api/feedback.py`):**
 - `FixtureFeedback`: action (add/remove/update_count/reject_position/add_position), fixture_code, reason, fixture_data
 - `ProjectFeedback`: per-project correction list with timestamps
-- `FeedbackHints`: derived hints passed to pipeline agents — `extra_fixtures`, `removed_codes`, `count_overrides`, `spec_patches`, `rejected_positions`, `added_positions`
+- `FeedbackHints`: derived hints passed to pipeline agents — `extra_fixtures`, `removed_codes`, `count_overrides`, `spec_patches`, `rejected_positions`, `added_positions`, `page_overrides`
 
 **Hint Application Points:**
 | Agent | Hint Type | Effect |
@@ -1190,6 +1226,7 @@ User corrects fixture table (UI)
 | Count Agent | `count_overrides` | Replaces text-counted values with user-provided counts |
 | Count Agent | `rejected_positions` | Excludes specific marker positions from counting |
 | Count Agent | `added_positions` | Includes user-added marker positions in counting |
+| Search Agent | `page_overrides` | Forces page classification (e.g., E601 → lighting_plan) |
 
 **Feedback API Endpoints:**
 | Endpoint | Method | Description |
@@ -1205,3 +1242,83 @@ User corrects fixture table (UI)
 3. On successful reprocessing → corrections promoted to `output/learnings/{source_key}.json`, project feedback cleared
 4. Next time same source is processed (any project) → learnings auto-loaded and applied as hints
 5. New corrections can further refine the learnings (merged, last correction wins)
+
+### Fix It: LLM-Powered Natural Language Corrections
+
+Contractors can describe corrections in plain English instead of clicking through modal forms. The system uses Claude API to interpret intent, previews structured actions for confirmation, then reprocesses.
+
+**Architecture:**
+```
+User types correction in Fix It panel
+    │
+    ├─ "fixture B6 count should be 25 not 26 on E200"
+    ├─ "missing 3 exit signs type EX on plan E200"
+    ├─ "E601 has enlarged lighting plan, process it"
+    │
+    └─ POST /api/projects/{id}/fix-it/interpret
+            │
+            └─ Claude Sonnet interprets → returns structured FixItAction list
+                    │
+                    └─ User reviews preview with checkboxes
+                            │
+                            └─ POST /api/projects/{id}/fix-it/confirm
+                                    │
+                                    ├─ Convert to FixtureFeedback
+                                    ├─ Save to project feedback
+                                    └─ Trigger reprocess with hints
+```
+
+**Fix It Action Types:**
+| Action | Description | Example Input |
+|--------|-------------|---------------|
+| `count_override` | Correct fixture count on a plan | "B6 should be 25 not 26 on E200" |
+| `add` | Add missing fixture type | "missing 3 exit signs type EX" |
+| `remove` | Remove wrongly extracted fixture | "remove fixture D6, it's not real" |
+| `update_spec` | Change fixture spec fields | "A1 voltage should be 277V" |
+| `reclassify_page` | Change page classification | "E601 has enlarged lighting plan" |
+
+**Page Reclassification:**
+- Users can reference pages by sheet code ("E601") or page number ("page 5")
+- When `reclassify_page` actions are confirmed, `page_overrides` are added to `FeedbackHints`
+- Search agent cache is invalidated when page overrides exist — forces full re-run of classification
+- `run_search.py` applies overrides via `_apply_page_overrides()` after normal classification
+
+**Key Files:**
+- `src/medina/api/fix_it.py` — LLM interpretation engine (prompt, context builder, API call)
+- `src/medina/api/routes/fix_it.py` — Two endpoints: interpret + confirm
+- `frontend/src/components/tables/FixItPanel.tsx` — UI panel (input → loading → preview → processing)
+
+**Fix It API Endpoints:**
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/projects/{id}/fix-it/interpret` | POST | Send user text → get structured actions preview |
+| `/api/projects/{id}/fix-it/confirm` | POST | Confirm actions → save feedback → trigger reprocess |
+
+### Global Pattern Detection
+
+Corrections across different source PDFs are analyzed for recurring patterns and promoted to global lessons that improve ALL future runs.
+
+**How it works:**
+1. After each reprocess, corrections are promoted to `output/learnings/{source_key}.json`
+2. `record_correction_pattern()` scans all learnings files
+3. Corrections are categorized by `PatternCategory` and grouped by `(category, fixture_code)`
+4. When 3+ unique sources show the same pattern → promoted to `output/learnings/_global_patterns.json`
+5. Every pipeline run loads global patterns via `get_global_hints()` and merges them first
+
+**Pattern Categories:**
+| Category | Trigger |
+|----------|---------|
+| `systematic_overcount` | count_override with corrected < original |
+| `systematic_undercount` | count_override with corrected > original |
+| `phantom_fixture_type` | remove with reason 'extra_fixture' |
+| `missing_fixture_type` | add action |
+| `short_code_ambiguity` | count_override for 1-2 char codes |
+| `spec_correction` | update_spec action |
+| `vlm_misread` | any correction with reason 'vlm_misread' |
+
+**Three-tier hint merging (each layer overrides the previous):**
+```
+global_patterns → learned_hints → explicit_feedback
+```
+
+**Key File:** `src/medina/api/patterns.py` — Pattern detection engine (deterministic Python, not LLM)

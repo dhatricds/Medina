@@ -16,7 +16,7 @@ _TYPE_KEYWORDS: list[tuple[list[str], PageType]] = [
     # "DEMOLITION LIGHTING PLAN" is classified as demolition.
     (["demolition", "demo plan", "demo "], PageType.DEMOLITION_PLAN),
     (["lighting plan", "lighting layout", "lighting area",
-      "electrical lighting"],
+      "electrical lighting", "electrical plan"],
      PageType.LIGHTING_PLAN),
     (["schedule"], PageType.SCHEDULE),
     (

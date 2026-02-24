@@ -93,7 +93,7 @@ def run_team(
     # --- Agent 1: Search (The Page Navigator) ---
     print("\n[1/5] SEARCH AGENT: Opening drawings, finding sheet index...")
     t1 = time.time()
-    search_result = run_search(source, work_dir)
+    search_result = run_search(source, work_dir, hints=hints)
     t_search = time.time() - t1
     print(f"      Completed in {t_search:.1f}s")
     print(

@@ -138,7 +138,7 @@ def _dict_to_fixture(raw: dict[str, Any]) -> FixtureRecord | None:
             dimming = dim_match.group(1).strip()
 
     return FixtureRecord(
-        code=code.upper(),
+        code=code.strip(),
         description=description,
         fixture_style=str(raw.get("fixture_style", "")).strip(),
         voltage=str(raw.get("voltage", "")).strip(),
@@ -257,6 +257,7 @@ def extract_schedule_vlm(
     for raw in raw_fixtures:
         fixture = _dict_to_fixture(raw)
         if fixture:
+            fixture.schedule_page = page_info.sheet_code or ""
             fixtures.append(fixture)
 
     # Filter out panel schedule entries that VLM may extract despite
@@ -348,18 +349,18 @@ def extract_plan_fixture_codes(pdf_pages: dict[int, Any]) -> set[str]:
         Set of unique fixture-like codes found on plan pages.
     """
     codes: set[str] = set()
-    # Match patterns like AL1, AL1E, WL2, EX1, EF3, B1, D7
-    code_pattern = re.compile(r'\b([A-Z]{1,3}\d+[A-Z]?)\b')
+    # Match patterns like AL1, AL1E, WL2, EX1, EF3, B1, D7 (and lowercase)
+    code_pattern = re.compile(r'\b([A-Za-z]{1,3}\d+[A-Za-z]?)\b')
 
     for page_num, pdf_page in pdf_pages.items():
         try:
             text = pdf_page.extract_text() or ""
         except Exception:
             continue
-        matches = code_pattern.findall(text.upper())
+        matches = code_pattern.findall(text)
         for m in matches:
             # Filter out non-fixture patterns (sheet codes, dates, etc.)
-            if len(m) <= 6 and not re.match(r'^(FE|SS|TR|JR|LP|CS|DP|VFD|UPS)\d', m):
+            if len(m) <= 6 and not re.match(r'^(FE|SS|TR|JR|LP|CS|DP|VFD|UPS)\d', m, re.IGNORECASE):
                 codes.add(m)
 
     return codes
@@ -384,16 +385,16 @@ def crossref_vlm_codes(
     if not plan_codes:
         return fixtures
 
-    plan_codes_upper = {c.upper() for c in plan_codes}
+    plan_codes_set = set(plan_codes)
 
     corrected: list[FixtureRecord] = []
     used_corrections: dict[str, str] = {}  # old_code -> new_code
 
     for fixture in fixtures:
-        code = fixture.code.upper()
+        code = fixture.code
 
         # If the code already exists on plan pages, keep it as-is
-        if code in plan_codes_upper:
+        if code in plan_codes_set:
             corrected.append(fixture)
             continue
 
@@ -401,7 +402,7 @@ def crossref_vlm_codes(
         clean_code = code.replace("-", "")
 
         # If the cleaned code exists on plan pages, use it
-        if clean_code in plan_codes_upper:
+        if clean_code in plan_codes_set:
             logger.info(
                 "VLM code correction: %s -> %s (stripped hyphens)",
                 code, clean_code,
@@ -413,7 +414,7 @@ def crossref_vlm_codes(
 
         # Try to find a plan code that is a longer version of this code.
         # E.g., VLM says "A1" but plan has "AL1".
-        candidates = _find_code_candidates(clean_code, plan_codes_upper)
+        candidates = _find_code_candidates(clean_code, plan_codes_set)
 
         if len(candidates) == 1:
             new_code = candidates[0]
@@ -444,13 +445,13 @@ def crossref_vlm_codes(
     # code+'E' isn't already in the fixture list, and description mentions
     # emergency-related terms.
     _EMERGENCY_KW = ("EMERGENCY", "BATTERY PACK", "BATTERY BACKUP")
-    existing_codes = {f.code.upper() for f in corrected}
+    existing_codes = {f.code for f in corrected}
     for i, fixture in enumerate(corrected):
-        code = fixture.code.upper()
-        if code.endswith("E"):
+        code = fixture.code
+        if code.endswith("E") or code.endswith("e"):
             continue
         code_e = code + "E"
-        if code_e not in plan_codes_upper:
+        if code_e not in plan_codes_set:
             continue
         if code_e in existing_codes:
             continue  # E-variant already present in schedule

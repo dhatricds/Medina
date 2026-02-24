@@ -3,16 +3,47 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import re
 from typing import Any
+
+from PIL import Image
 
 from medina.config import MedinaConfig, get_config
 from medina.exceptions import VisionAPIError
 from medina.models import PageInfo
 
 logger = logging.getLogger(__name__)
+
+
+def _crop_to_viewport(
+    image_bytes: bytes,
+    viewport_bbox: tuple[float, float, float, float],
+    pdf_width: float,
+    pdf_height: float,
+) -> bytes:
+    """Crop a rendered page image to just the viewport area.
+
+    Converts PDF-point coordinates to pixel coordinates based on the
+    image dimensions, then crops.
+    """
+    img = Image.open(io.BytesIO(image_bytes))
+    iw, ih = img.size
+    x_scale = iw / pdf_width
+    y_scale = ih / pdf_height
+    x0, y0, x1, y1 = viewport_bbox
+    crop_box = (
+        int(x0 * x_scale),
+        int(y0 * y_scale),
+        int(x1 * x_scale),
+        int(y1 * y_scale),
+    )
+    cropped = img.crop(crop_box)
+    buf = io.BytesIO()
+    cropped.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _build_prompt(fixture_codes: list[str], sheet_code: str) -> str:
@@ -139,7 +170,34 @@ def count_fixtures_vision(
         ) from exc
 
     prompt = _build_prompt(fixture_codes, sheet)
-    encoded_image = base64.b64encode(image_bytes).decode()
+
+    # Crop to viewport if this is a sub-plan on a multi-viewport page.
+    img_to_send = image_bytes
+    if page_info.viewport_bbox is not None:
+        try:
+            from medina.pdf.renderer import render_page_to_pil
+            # Need original PDF dimensions for coordinate mapping.
+            # Estimate from image + DPI, or use a standard approach.
+            img = Image.open(io.BytesIO(image_bytes))
+            iw, ih = img.size
+            # We don't know the exact PDF dimensions here, but viewport_bbox
+            # is in PDF points. Estimate PDF size from the image assuming
+            # the DPI used for rendering.
+            # Common approach: assume 150 DPI (the max used for vision).
+            est_dpi = 150
+            pdf_w = iw * 72 / est_dpi
+            pdf_h = ih * 72 / est_dpi
+            img_to_send = _crop_to_viewport(
+                image_bytes, page_info.viewport_bbox, pdf_w, pdf_h,
+            )
+            logger.debug(
+                "Cropped vision image to viewport %s for %s",
+                page_info.viewport_bbox, sheet,
+            )
+        except Exception as e:
+            logger.warning("Viewport crop failed for %s: %s", sheet, e)
+
+    encoded_image = base64.b64encode(img_to_send).decode()
 
     try:
         client = Anthropic(api_key=config.anthropic_api_key)

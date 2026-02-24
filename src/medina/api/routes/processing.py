@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
 from medina.api.models import FromSourceRequest, ProjectCreateResponse
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api", tags=["processing"])
 
 
 @router.post("/projects/from-source", response_model=ProjectCreateResponse)
-async def create_from_source(req: FromSourceRequest):
+async def create_from_source(req: FromSourceRequest, request: Request):
     """Create a project from an existing data/ path."""
     from pathlib import Path
 
@@ -25,7 +25,8 @@ async def create_from_source(req: FromSourceRequest):
     if not source.exists():
         raise HTTPException(status_code=404, detail=f"Source not found: {req.source_path}")
 
-    project = create_project(source)
+    tenant_id = getattr(request.state, "tenant_id", "default")
+    project = create_project(source, tenant_id=tenant_id)
     return ProjectCreateResponse(
         project_id=project.project_id,
         source=str(source),
@@ -33,9 +34,10 @@ async def create_from_source(req: FromSourceRequest):
 
 
 @router.post("/projects/{project_id}/run")
-async def run_project(project_id: str, background_tasks: BackgroundTasks):
+async def run_project(project_id: str, request: Request, background_tasks: BackgroundTasks):
     """Start the pipeline for a project (runs in background)."""
-    project = get_project(project_id)
+    tenant_id = getattr(request.state, "tenant_id", "default")
+    project = get_project(project_id, tenant_id=tenant_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     if project.status == "running":
@@ -48,9 +50,10 @@ async def run_project(project_id: str, background_tasks: BackgroundTasks):
 
 
 @router.get("/projects/{project_id}/status")
-async def project_status_stream(project_id: str):
+async def project_status_stream(project_id: str, request: Request):
     """SSE stream of agent progress events."""
-    project = get_project(project_id)
+    tenant_id = getattr(request.state, "tenant_id", "default")
+    project = get_project(project_id, tenant_id=tenant_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 

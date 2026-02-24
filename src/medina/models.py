@@ -32,6 +32,15 @@ class SheetIndexEntry(BaseModel):
     inferred_type: PageType | None = None
 
 
+class Viewport(BaseModel):
+    """A single viewport (sub-plan) within a multi-viewport page."""
+
+    label: str  # Short label: "L1", "MEZ", "BSM"
+    title: str  # Full title: "LEVEL 1 ENLARGED LIGHTING PLAN"
+    bbox: tuple[float, float, float, float]  # (x0, y0, x1, y1) in PDF points
+    page_type: PageType = PageType.LIGHTING_PLAN
+
+
 class PageInfo(BaseModel):
     """Metadata for a single page in the document set."""
 
@@ -41,6 +50,10 @@ class PageInfo(BaseModel):
     page_type: PageType = PageType.OTHER
     source_path: Path
     pdf_page_index: int = 0
+    # Viewport support: when set, this PageInfo represents a sub-plan
+    # within a multi-viewport page.
+    viewport_bbox: tuple[float, float, float, float] | None = None  # (x0, y0, x1, y1)
+    parent_sheet_code: str | None = None  # Original code before split (e.g., "E601")
 
 
 class FixtureRecord(BaseModel):
@@ -55,6 +68,7 @@ class FixtureRecord(BaseModel):
     cct: str = ""
     dimming: str = ""
     max_va: str = ""
+    schedule_page: str = ""  # sheet code of schedule page this fixture was extracted from
     counts_per_plan: dict[str, int] = Field(default_factory=dict)
     total: int = 0
 

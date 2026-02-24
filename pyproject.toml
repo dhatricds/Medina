@@ -31,6 +31,9 @@ api = [
     "uvicorn[standard]>=0.25",
     "python-multipart>=0.0.6",
     "sse-starlette>=1.8",
+    "chromadb>=0.4.22",
+    "pyjwt>=2.8",
+    "bcrypt>=4.0",
 ]
 
 [project.scripts]

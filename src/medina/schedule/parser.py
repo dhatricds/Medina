@@ -561,6 +561,8 @@ def parse_all_schedules(
         source = page_info.sheet_code or str(page_info.page_number)
         for table in tables:
             fixtures = parse_schedule_table(table, source_page=source)
+            for f in fixtures:
+                f.schedule_page = source
             all_fixtures.extend(fixtures)
 
     # Deduplicate by fixture code, keeping the most complete record.
@@ -598,7 +600,7 @@ def _deduplicate_fixtures(
     """Deduplicate fixtures by code, keeping the most complete record."""
     by_code: dict[str, FixtureRecord] = {}
     for f in fixtures:
-        key = f.code.upper().strip()
+        key = f.code.strip()
         if not key:
             continue
         existing = by_code.get(key)

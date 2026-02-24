@@ -52,6 +52,10 @@ def _is_in_exclusion_zone(
     y: float,
     page_width: float,
     page_height: float,
+    viewport_bbox: tuple[float, float, float, float] | None = None,
+    legend_col_x_frac: float | None = None,
+    title_block_x_frac: float | None = None,
+    page_bbox: tuple[float, float, float, float] | None = None,
 ) -> bool:
     """Check whether a coordinate falls inside an exclusion zone.
 
@@ -59,18 +63,59 @@ def _is_in_exclusion_zone(
     - Legend column: rightmost 15% at any height (notes, keynotes, stamps)
     - Title block: rightmost 20% AND bottom 15% (the corner box)
     - Border: outermost 2% on all four sides
+
+    When *viewport_bbox* is set, exclusion zone fractions are computed
+    relative to the viewport dimensions instead of the full page.
+    Characters outside the viewport are always excluded.
+
+    When *page_bbox* is set, use it as the actual coordinate space
+    (handles PDFs with non-zero origin, e.g., bbox starting at x=-1224).
     """
-    min_x = page_width * _BORDER_FRAC
-    max_x = page_width * (1 - _BORDER_FRAC)
-    min_y = page_height * _BORDER_FRAC
-    max_y = page_height * (1 - _BORDER_FRAC)
+    lcx = legend_col_x_frac if legend_col_x_frac is not None else _LEGEND_COL_X_FRAC
+    tbx = title_block_x_frac if title_block_x_frac is not None else _TITLE_BLOCK_X_FRAC
+
+    # Origin-aware: use page_bbox for actual coordinate space
+    if page_bbox is not None:
+        px0, py0, px1, py1 = page_bbox
+    else:
+        px0, py0, px1, py1 = 0.0, 0.0, page_width, page_height
+    pw = px1 - px0
+    ph = py1 - py0
+
+    if viewport_bbox is not None:
+        vx0, vy0, vx1, vy1 = viewport_bbox
+        # Must be inside viewport
+        if x < vx0 or x > vx1 or y < vy0 or y > vy1:
+            return True
+        vw = vx1 - vx0
+        vh = vy1 - vy0
+        # Compute border zones relative to viewport
+        min_x = vx0 + vw * _BORDER_FRAC
+        max_x = vx0 + vw * (1 - _BORDER_FRAC)
+        min_y = vy0 + vh * _BORDER_FRAC
+        max_y = vy0 + vh * (1 - _BORDER_FRAC)
+        if x < min_x or x > max_x or y < min_y or y > max_y:
+            return True
+        # Legend and title block exclusions use FULL PAGE dimensions —
+        # the legend/notes panel sits outside the viewport on the full page,
+        # so computing these relative to viewport width clips real fixtures.
+        if x > px0 + pw * lcx:
+            return True
+        if x > px0 + pw * tbx and y > py0 + ph * _TITLE_BLOCK_Y_FRAC:
+            return True
+        return False
+
+    min_x = px0 + pw * _BORDER_FRAC
+    max_x = px0 + pw * (1 - _BORDER_FRAC)
+    min_y = py0 + ph * _BORDER_FRAC
+    max_y = py0 + ph * (1 - _BORDER_FRAC)
     if x < min_x or x > max_x or y < min_y or y > max_y:
         return True
 
-    if x > page_width * _LEGEND_COL_X_FRAC:
+    if x > px0 + pw * lcx:
         return True
 
-    if x > page_width * _TITLE_BLOCK_X_FRAC and y > page_height * _TITLE_BLOCK_Y_FRAC:
+    if x > px0 + pw * tbx and y > py0 + ph * _TITLE_BLOCK_Y_FRAC:
         return True
 
     return False
@@ -153,6 +198,11 @@ def _find_char_sequences(
     page_width: float,
     page_height: float,
     schedule_bbox: tuple[float, float, float, float] | None,
+    viewport_bbox: tuple[float, float, float, float] | None = None,
+    iso_gap: float = 15.0,
+    legend_col_x_frac: float | None = None,
+    title_block_x_frac: float | None = None,
+    page_bbox: tuple[float, float, float, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Find character sequences on the page that spell *code*.
 
@@ -160,8 +210,7 @@ def _find_char_sequences(
       ``x0``, ``top``, ``x1``, ``bottom``, ``cx``, ``cy``, ``font_size``,
       ``char_index`` (index into *chars* of the first character).
     """
-    code_upper = code.upper()
-    code_len = len(code_upper)
+    code_len = len(code)
     matches: list[dict[str, Any]] = []
 
     # For single-char codes, pre-build a y-binned spatial index for isolation
@@ -181,7 +230,7 @@ def _find_char_sequences(
         # --- 1. Check spelling ---
         valid = True
         for j in range(code_len):
-            if chars[i + j]["text"].upper() != code_upper[j]:
+            if chars[i + j]["text"] != code[j]:
                 valid = False
                 break
             # Adjacency with previous character in the sequence.
@@ -227,7 +276,7 @@ def _find_char_sequences(
         # For multi-char codes the word-boundary checks suffice; applying
         # isolation to them causes false rejections on dense plans.
         if code_len == 1 and _y_bins is not None:
-            _ISO_GAP = 15.0
+            _ISO_GAP = iso_gap
             first_c = chars[i]
             last_c = chars[i + code_len - 1]
             match_x0 = first_c["x0"]
@@ -255,7 +304,10 @@ def _find_char_sequences(
         cx = (first["x0"] + last["x1"]) / 2
         cy = (first["top"] + first["bottom"]) / 2
 
-        if _is_in_exclusion_zone(cx, cy, page_width, page_height):
+        if _is_in_exclusion_zone(cx, cy, page_width, page_height, viewport_bbox,
+                                legend_col_x_frac=legend_col_x_frac,
+                                title_block_x_frac=title_block_x_frac,
+                                page_bbox=page_bbox):
             continue
         if schedule_bbox and _is_in_bbox(cx, cy, schedule_bbox):
             continue
@@ -278,6 +330,7 @@ def _find_char_sequences(
 def _apply_font_size_filter(
     all_matches: dict[str, list[dict[str, Any]]],
     tolerance: float = _FONT_SIZE_TOLERANCE,
+    short_code_tolerance: float = _SHORT_CODE_FONT_TOLERANCE,
 ) -> dict[str, list[dict[str, Any]]]:
     """Remove matches whose font size deviates from the modal fixture size.
 
@@ -309,8 +362,8 @@ def _apply_font_size_filter(
         # annotation text at slightly different sizes.  Two-char+ codes
         # keep the normal tolerance since they're less ambiguous.
         if len(code) == 1:
-            code_lo = modal_size / _SHORT_CODE_FONT_TOLERANCE
-            code_hi = modal_size * _SHORT_CODE_FONT_TOLERANCE
+            code_lo = modal_size / short_code_tolerance
+            code_hi = modal_size * short_code_tolerance
         else:
             code_lo, code_hi = lo, hi
 
@@ -392,6 +445,7 @@ def _is_near_crossref(
 def _extract_plan_words(
     pdf_page: Any,
     schedule_bbox: tuple[float, float, float, float] | None = None,
+    viewport_bbox: tuple[float, float, float, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Extract words from a pdfplumber page, filtering out exclusion zones.
 
@@ -399,6 +453,7 @@ def _extract_plan_words(
     """
     page_width = pdf_page.width
     page_height = pdf_page.height
+    page_bbox = tuple(pdf_page.bbox)
 
     words = pdf_page.extract_words(
         x_tolerance=3,
@@ -410,7 +465,8 @@ def _extract_plan_words(
     for w in words:
         cx = (w["x0"] + w["x1"]) / 2
         cy = (w["top"] + w["bottom"]) / 2
-        if _is_in_exclusion_zone(cx, cy, page_width, page_height):
+        if _is_in_exclusion_zone(cx, cy, page_width, page_height, viewport_bbox,
+                                page_bbox=page_bbox):
             continue
         if schedule_bbox and _is_in_bbox(cx, cy, schedule_bbox):
             continue
@@ -449,6 +505,7 @@ def count_fixtures_on_plan(
     return_positions: bool = False,
     rejected_positions: dict[str, list[dict[str, float]]] | None = None,
     added_positions: dict[str, list[dict[str, float]]] | None = None,
+    runtime_params: dict[str, Any] | None = None,
 ) -> dict[str, int] | dict[str, dict]:
     """Count occurrences of each fixture code on a single lighting plan page.
 
@@ -481,6 +538,15 @@ def count_fixtures_on_plan(
     Raises:
         FixtureCountError: If text extraction fails critically.
     """
+    # Resolve runtime parameter overrides (local, thread-safe)
+    p = runtime_params or {}
+    eff_title_block_x = p.get("title_block_frac", _TITLE_BLOCK_X_FRAC)
+    eff_legend_col_x = p.get("legend_col_x_frac", _LEGEND_COL_X_FRAC)
+    eff_font_tol = p.get("font_size_tolerance_multi", _FONT_SIZE_TOLERANCE)
+    eff_short_font_tol = p.get("font_size_tolerance_single", _SHORT_CODE_FONT_TOLERANCE)
+    eff_dedup_dist = p.get("dedup_distance", _SHORT_CODE_DEDUP_DIST)
+    eff_iso_gap = p.get("isolation_distance", 15.0)
+
     sheet = page_info.sheet_code or f"page_{page_info.page_number}"
     logger.info("Counting fixtures on plan %s (page %d)", sheet, page_info.page_number)
 
@@ -503,17 +569,26 @@ def count_fixtures_on_plan(
 
     page_width = pdf_page.width
     page_height = pdf_page.height
+    page_bbox = tuple(pdf_page.bbox)
     schedule_bbox = _find_schedule_table_bbox(pdf_page)
+    viewport_bbox = page_info.viewport_bbox
 
     # --- Step 1: character-level detection for every code ---
     all_matches: dict[str, list[dict[str, Any]]] = {}
     for code in fixture_codes:
         all_matches[code] = _find_char_sequences(
             chars, code, page_width, page_height, schedule_bbox,
+            viewport_bbox=viewport_bbox,
+            iso_gap=eff_iso_gap,
+            legend_col_x_frac=eff_legend_col_x,
+            title_block_x_frac=eff_title_block_x,
+            page_bbox=page_bbox,
         )
 
     # --- Step 2: modal font-size filtering ---
-    all_matches = _apply_font_size_filter(all_matches)
+    all_matches = _apply_font_size_filter(
+        all_matches, tolerance=eff_font_tol, short_code_tolerance=eff_short_font_tol,
+    )
 
     # --- Step 2.5: spatial de-duplication for single-char codes ---
     # Single-char fixture codes (e.g. "A") can appear twice near the same
@@ -521,7 +596,7 @@ def count_fixtures_on_plan(
     for code in fixture_codes:
         if len(code) == 1 and len(all_matches.get(code, [])) > 1:
             before = len(all_matches[code])
-            all_matches[code] = _deduplicate_nearby_matches(all_matches[code])
+            all_matches[code] = _deduplicate_nearby_matches(all_matches[code], min_distance=eff_dedup_dist)
             removed = before - len(all_matches[code])
             if removed:
                 logger.debug(
@@ -537,7 +612,7 @@ def count_fixtures_on_plan(
             if code.upper() not in sheet_code_set:
                 continue
             if words is None:
-                words = _extract_plan_words(pdf_page, schedule_bbox)
+                words = _extract_plan_words(pdf_page, schedule_bbox, viewport_bbox)
             before = len(all_matches[code])
             all_matches[code] = [
                 m for m in all_matches[code]
@@ -666,6 +741,7 @@ def count_all_plans(
     return_positions: bool = False,
     all_rejected_positions: dict[str, dict[str, list[dict[str, float]]]] | None = None,
     all_added_positions: dict[str, dict[str, list[dict[str, float]]]] | None = None,
+    runtime_params: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, int]] | tuple[dict[str, dict[str, int]], dict]:
     """Count fixtures on all lighting plan pages.
 
@@ -736,6 +812,7 @@ def count_all_plans(
                 return_positions=return_positions,
                 rejected_positions=plan_rejects,
                 added_positions=plan_adds,
+                runtime_params=runtime_params,
             )
         except FixtureCountError:
             logger.exception("Error counting fixtures on plan %s", sheet)
@@ -748,13 +825,31 @@ def count_all_plans(
                 results[sheet] = {
                     code: raw[code]["count"] for code in fixture_codes
                 }
+                # Normalize positions from native bbox space to
+                # (0,0)-origin image space for rendering overlay.
+                bbox = tuple(pdf_page.bbox)
+                ox, oy = bbox[0], bbox[1]
+                fixtures_pos: dict[str, list[dict]] = {}
+                for code in fixture_codes:
+                    raw_list = raw[code]["positions"]
+                    if ox != 0.0 or oy != 0.0:
+                        fixtures_pos[code] = [
+                            {
+                                "x0": p["x0"] - ox,
+                                "top": p["top"] - oy,
+                                "x1": p["x1"] - ox,
+                                "bottom": p["bottom"] - oy,
+                                "cx": p["cx"] - ox,
+                                "cy": p["cy"] - oy,
+                            }
+                            for p in raw_list
+                        ]
+                    else:
+                        fixtures_pos[code] = raw_list
                 all_positions[sheet] = {
                     "page_width": pdf_page.width,
                     "page_height": pdf_page.height,
-                    "fixtures": {
-                        code: raw[code]["positions"]
-                        for code in fixture_codes
-                    },
+                    "fixtures": fixtures_pos,
                 }
             else:
                 results[sheet] = raw  # type: ignore[assignment]

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from medina.api.feedback import (
@@ -217,14 +217,23 @@ def _recalc_summary(data: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.get("")
-async def list_dashboard_projects():
-    """List all approved dashboard projects (summary cards)."""
-    return _read_index()
+async def list_dashboard_projects(request: Request):
+    """List approved dashboard projects for the current tenant."""
+    tenant_id = getattr(request.state, "tenant_id", "default")
+    index = _read_index()
+    return [e for e in index if e.get("tenant_id", "default") == tenant_id]
 
 
 @router.get("/{dashboard_id}")
-async def get_dashboard_project(dashboard_id: str):
+async def get_dashboard_project(dashboard_id: str, request: Request):
     """Get full project data for a dashboard entry."""
+    tenant_id = getattr(request.state, "tenant_id", "default")
+    # Verify ownership
+    index = _read_index()
+    entry = next((e for e in index if e["id"] == dashboard_id), None)
+    if not entry or entry.get("tenant_id", "default") != tenant_id:
+        raise HTTPException(status_code=404, detail="Dashboard project not found")
+
     project_path = DASHBOARD_DIR / f"{dashboard_id}.json"
     if not project_path.exists():
         raise HTTPException(status_code=404, detail="Dashboard project not found")
@@ -233,17 +242,20 @@ async def get_dashboard_project(dashboard_id: str):
 
 
 @router.get("/{dashboard_id}/export/excel")
-async def export_dashboard_excel(dashboard_id: str):
+async def export_dashboard_excel(dashboard_id: str, request: Request):
     """Download the Excel file for a dashboard project."""
+    tenant_id = getattr(request.state, "tenant_id", "default")
     xlsx_path = DASHBOARD_DIR / f"{dashboard_id}.xlsx"
     if not xlsx_path.exists():
         raise HTTPException(status_code=404, detail="Excel file not found")
 
-    # Find project name for filename
+    # Find project name for filename and verify ownership
     index = _read_index()
     name = dashboard_id
     for entry in index:
         if entry["id"] == dashboard_id:
+            if entry.get("tenant_id", "default") != tenant_id:
+                raise HTTPException(status_code=404, detail="Dashboard project not found")
             name = entry["name"]
             break
 
@@ -256,14 +268,15 @@ async def export_dashboard_excel(dashboard_id: str):
 
 
 @router.post("/approve/{project_id}")
-async def approve_project(project_id: str, body: ApproveRequest | None = None):
+async def approve_project(project_id: str, request: Request, body: ApproveRequest | None = None):
     """Approve a processed project and add it to the dashboard.
 
     If the frontend sends corrected fixtures/keynotes, the dashboard will
     store the corrected data and generate the Excel from it.  Diffs between
     original and corrected data are saved as learnings for future runs.
     """
-    project = get_project(project_id)
+    tenant_id = getattr(request.state, "tenant_id", "default")
+    project = get_project(project_id, tenant_id=tenant_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -373,6 +386,7 @@ async def approve_project(project_id: str, body: ApproveRequest | None = None):
     entry = {
         "id": dashboard_id,
         "name": project_name,
+        "tenant_id": tenant_id,
         "approved_at": now,
         "fixture_types": summary.get("total_fixture_types", 0),
         "total_fixtures": summary.get("total_fixtures", 0),
@@ -389,13 +403,17 @@ async def approve_project(project_id: str, body: ApproveRequest | None = None):
 
 
 @router.delete("/{dashboard_id}")
-async def delete_dashboard_project(dashboard_id: str):
+async def delete_dashboard_project(dashboard_id: str, request: Request):
     """Remove a project from the dashboard."""
+    tenant_id = getattr(request.state, "tenant_id", "default")
     index = _read_index()
-    new_index = [e for e in index if e["id"] != dashboard_id]
 
-    if len(new_index) == len(index):
+    # Only allow deleting own tenant's projects
+    entry = next((e for e in index if e["id"] == dashboard_id), None)
+    if not entry or entry.get("tenant_id", "default") != tenant_id:
         raise HTTPException(status_code=404, detail="Dashboard project not found")
+
+    new_index = [e for e in index if e["id"] != dashboard_id]
 
     _write_index(new_index)
 

@@ -4,11 +4,18 @@ interface Props {
   value: number;
   onChange: (newValue: number) => void;
   onLocate?: () => void;
+  /** Previous count before reprocess — shown as diff indicator when present. */
+  previousCount?: number;
 }
 
-export default function EditableCell({ value, onChange, onLocate }: Props) {
+export default function EditableCell({ value, onChange, onLocate, previousCount }: Props) {
   const [editing, setEditing] = useState(false);
   const cellRef = useRef<HTMLTableCellElement>(null);
+
+  const hasDiff = previousCount !== undefined && previousCount !== value;
+  const diffAmount = hasDiff ? value - previousCount! : 0;
+  const diffUp = diffAmount > 0;
+  const diffDown = diffAmount < 0;
 
   const handleInput = () => {
     if (!cellRef.current) return;
@@ -68,11 +75,26 @@ export default function EditableCell({ value, onChange, onLocate }: Props) {
           : onLocate
             ? 'cursor-pointer hover:bg-blue-50 hover:text-accent hover:font-semibold'
             : 'cursor-text'
-      } ${value === 0 ? 'text-slate-300' : ''}`}
-      title={onLocate && !editing ? 'Click to locate on plan · Double-click to edit' : undefined}
+      } ${value === 0 ? 'text-slate-300' : ''} ${
+        diffUp ? 'bg-green-50 font-semibold' : diffDown ? 'bg-red-50 font-semibold' : ''
+      }`}
+      title={
+        hasDiff
+          ? `Changed: ${previousCount} → ${value} (${diffUp ? '+' : ''}${diffAmount})`
+          : onLocate && !editing
+            ? 'Click to locate on plan · Double-click to edit'
+            : undefined
+      }
     >
       {value}
-      {onLocate && !editing && (
+      {hasDiff && !editing && (
+        <span className={`absolute -top-1 -right-1 text-[9px] font-bold px-0.5 rounded ${
+          diffUp ? 'text-green-700 bg-green-200' : 'text-red-700 bg-red-200'
+        }`}>
+          {diffUp ? '+' : ''}{diffAmount}
+        </span>
+      )}
+      {onLocate && !editing && !hasDiff && (
         <span className="absolute right-0.5 top-1/2 -translate-y-1/2 opacity-0 group-hover/cell:opacity-60 text-accent text-[9px] pointer-events-none">
           <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5">
             <path d="M8 1a5 5 0 0 0-5 5c0 3.5 5 9 5 9s5-5.5 5-9a5 5 0 0 0-5-5zm0 7a2 2 0 1 1 0-4 2 2 0 0 1 0 4z" />

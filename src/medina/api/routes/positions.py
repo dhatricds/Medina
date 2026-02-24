@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from medina.api.projects import get_project
 
@@ -14,27 +14,34 @@ router = APIRouter(prefix="/api/projects", tags=["positions"])
 
 
 @router.get("/{project_id}/page/{page_number}/positions")
-async def get_page_positions(project_id: str, page_number: int):
+async def get_page_positions(
+    project_id: str,
+    page_number: int,
+    request: Request,
+    sheet_code: str | None = None,
+):
     """Return fixture and keynote positions for a specific page.
 
     Maps ``page_number`` to the plan's ``sheet_code`` via the project's
     page list, then looks up positions from the ``_positions.json`` file.
+    When ``sheet_code`` is provided (e.g. for sub-plan viewports that share
+    a physical page), the page_number→sheet_code resolution is skipped.
     """
-    project = get_project(project_id)
+    project = get_project(project_id, tenant_id=getattr(request.state, "tenant_id", "default"))
     if not project:
         raise HTTPException(404, "Project not found")
 
     if not project.output_path:
         return {"positions": None, "reason": "Project has no output yet"}
 
-    # Resolve sheet_code from page_number
+    # Resolve sheet_code from page_number (skip if caller provided it)
     result_data = project.result_data or {}
     pages = result_data.get("pages", [])
-    sheet_code = None
-    for p in pages:
-        if p.get("page_number") == page_number:
-            sheet_code = p.get("sheet_code")
-            break
+    if not sheet_code:
+        for p in pages:
+            if p.get("page_number") == page_number:
+                sheet_code = p.get("sheet_code")
+                break
 
     if not sheet_code:
         return {"positions": None, "reason": f"No sheet code for page {page_number}"}

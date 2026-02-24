@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 
 from medina.api.projects import get_project
@@ -38,10 +38,11 @@ def _resolve_page_source(project, page_number: int) -> tuple[Path, int]:
 async def get_page_image(
     project_id: str,
     page_number: int,
+    request: Request,
     dpi: int = Query(default=150, ge=72, le=600),
 ):
     """Render a PDF page as a PNG image (fallback for non-PDF rendering)."""
-    project = get_project(project_id)
+    project = get_project(project_id, tenant_id=getattr(request.state, "tenant_id", "default"))
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -59,6 +60,7 @@ async def get_page_image(
 async def get_page_as_pdf(
     project_id: str,
     page_number: int,
+    request: Request,
 ):
     """Serve an individual page as a standalone PDF for client-side rendering.
 
@@ -66,7 +68,7 @@ async def get_page_as_pdf(
     PDF document, enabling vector-quality client-side rendering via pdf.js.
     Works for both single-file and folder-based projects.
     """
-    project = get_project(project_id)
+    project = get_project(project_id, tenant_id=getattr(request.state, "tenant_id", "default"))
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -100,9 +102,9 @@ async def get_page_as_pdf(
 
 
 @router.get("/projects/{project_id}/pdf")
-async def get_pdf_file(project_id: str):
+async def get_pdf_file(project_id: str, request: Request):
     """Serve the raw PDF file for client-side rendering."""
-    project = get_project(project_id)
+    project = get_project(project_id, tenant_id=getattr(request.state, "tenant_id", "default"))
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 

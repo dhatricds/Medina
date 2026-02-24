@@ -46,7 +46,7 @@ def _is_valid_fixture_code(code: str) -> bool:
     return True
 
 
-def run(source: str, work_dir: str, hints=None) -> dict:
+def run(source: str, work_dir: str, hints=None, source_key: str = "", project_id: str = "") -> dict:
     """Run stage 4: SCHEDULE EXTRACTION."""
     from medina.pdf.loader import load
     from medina.pdf.classifier import classify_pages
@@ -158,19 +158,39 @@ def run(source: str, work_dir: str, hints=None) -> dict:
                 label,
             )
             try:
-                sched_dpi = min(config.render_dpi, 200)
+                from PIL import Image
+                import io
+
+                _MAX_VLM_PIXEL = 8000  # Claude Vision API max dimension
+
+                sched_render_dpi = 200
+                try:
+                    from medina.runtime_params import get_param
+                    sched_render_dpi = get_param("schedule_render_dpi", source_key=source_key, project_id=project_id)
+                except Exception:
+                    pass
+                sched_dpi = min(config.render_dpi, sched_render_dpi)
                 img_bytes = render_page_to_image(
                     spage.source_path, spage.pdf_page_index,
                     dpi=sched_dpi,
                 )
                 b64_size = len(base64.b64encode(img_bytes))
-                while b64_size > 5_000_000 and sched_dpi > 72:
+                img = Image.open(io.BytesIO(img_bytes))
+                max_dim = max(img.size)
+                while (b64_size > 5_000_000 or max_dim > _MAX_VLM_PIXEL) and sched_dpi > 72:
                     sched_dpi = max(72, sched_dpi - 20)
                     img_bytes = render_page_to_image(
                         spage.source_path, spage.pdf_page_index,
                         dpi=sched_dpi,
                     )
                     b64_size = len(base64.b64encode(img_bytes))
+                    img = Image.open(io.BytesIO(img_bytes))
+                    max_dim = max(img.size)
+                logger.info(
+                    "[SCHEDULE] VLM render: %s at %d DPI, %dx%d px, %.1f MB",
+                    label, sched_dpi, img.size[0], img.size[1],
+                    b64_size / 1_000_000,
+                )
                 vlm_fixtures = extract_schedule_vlm(
                     spage, img_bytes, config,
                     plan_codes_hint=(

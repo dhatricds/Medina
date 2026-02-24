@@ -8,10 +8,11 @@ import AgentPipeline from './components/agents/AgentPipeline';
 import TabContainer from './components/tables/TabContainer';
 import DashboardView from './components/dashboard/DashboardView';
 import DashboardDetail from './components/dashboard/DashboardDetail';
+import ProtectedRoute from './components/auth/ProtectedRoute';
 import { useProjectStore } from './store/projectStore';
 import { useAgentProgress } from './hooks/useAgentProgress';
 
-export default function App() {
+function AppContent() {
   const { view, appState, loadSources, loadDashboard } = useProjectStore();
 
   // Activate SSE listener for agent progress events
@@ -53,5 +54,13 @@ export default function App() {
       />
       <BottomBar />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <ProtectedRoute>
+      <AppContent />
+    </ProtectedRoute>
   );
 }

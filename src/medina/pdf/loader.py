@@ -365,14 +365,16 @@ def _extract_sheet_code_from_title_block(
     page: Any,
 ) -> str | None:
     """Extract sheet code from title block using pdfplumber."""
-    width = page.width
-    height = page.height
+    # Use page.bbox for origin-aware coordinates (some PDFs have
+    # non-zero origins, e.g., bbox starting at x=-1224).
+    x0, y0, x1, y1 = page.bbox
+    w, h = x1 - x0, y1 - y0
 
     bbox = (
-        width * 0.60,
-        height * 0.80,
-        width,
-        height,
+        x0 + w * 0.60,
+        y0 + h * 0.80,
+        x1,
+        y1,
     )
     try:
         cropped = page.within_bbox(bbox)
@@ -388,14 +390,14 @@ def _extract_sheet_title(
     sheet_code: str | None,
 ) -> str | None:
     """Extract sheet title from title block using pdfplumber."""
-    width = page.width
-    height = page.height
+    x0, y0, x1, y1 = page.bbox
+    w, h = x1 - x0, y1 - y0
 
     bbox = (
-        width * 0.55,
-        height * 0.85,
-        width,
-        height,
+        x0 + w * 0.55,
+        y0 + h * 0.85,
+        x1,
+        y1,
     )
     try:
         cropped = page.within_bbox(bbox)

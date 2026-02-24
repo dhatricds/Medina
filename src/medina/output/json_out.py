@@ -33,6 +33,7 @@ def build_json_output(result: ExtractionResult) -> dict:
             "cct": f.cct,
             "dimming": f.dimming,
             "max_va": f.max_va,
+            "schedule_page": f.schedule_page,
             "counts_per_plan": f.counts_per_plan,
             "total": f.total,
         }
@@ -78,6 +79,13 @@ def build_json_output(result: ExtractionResult) -> dict:
         for p in result.pages
     ]
 
+    # Build viewport_map: maps composite keys (e.g., "E601-L1") to physical
+    # page numbers so the frontend can navigate to the correct PDF page.
+    viewport_map: dict[str, int] = {}
+    for p in result.pages:
+        if p.parent_sheet_code and p.sheet_code:
+            viewport_map[p.sheet_code] = p.page_number
+
     return {
         "project_name": result.source,
         "total_pages": len(result.pages),
@@ -94,6 +102,7 @@ def build_json_output(result: ExtractionResult) -> dict:
             "total_keynotes": len(result.keynotes),
         },
         "qa_report": qa_data,
+        "viewport_map": viewport_map if viewport_map else None,
     }
 
 

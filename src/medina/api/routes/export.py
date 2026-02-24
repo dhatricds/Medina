@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -23,9 +23,9 @@ class CorrectedExportRequest(BaseModel):
 
 
 @router.get("/projects/{project_id}/export/excel")
-async def export_excel(project_id: str):
+async def export_excel(project_id: str, request: Request):
     """Download the pipeline-generated Excel workbook (original counts)."""
-    project = get_project(project_id)
+    project = get_project(project_id, tenant_id=getattr(request.state, "tenant_id", "default"))
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -45,14 +45,14 @@ async def export_excel(project_id: str):
 
 
 @router.post("/projects/{project_id}/export/excel")
-async def export_corrected_excel(project_id: str, body: CorrectedExportRequest):
+async def export_corrected_excel(project_id: str, request: Request, body: CorrectedExportRequest):
     """Generate and download Excel with user-corrected counts.
 
     The frontend sends the current fixture/keynote data (including any
     edits the user has made) and this endpoint regenerates the Excel
     on-the-fly with those values.
     """
-    project = get_project(project_id)
+    project = get_project(project_id, tenant_id=getattr(request.state, "tenant_id", "default"))
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 

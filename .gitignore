@@ -26,6 +26,10 @@ ENV/
 # Project-specific
 data/
 /output/
+src/output/
+*.db
+*.db-shm
+*.db-wal
 uploads/
 *.xlsx
 !sample/**/*.xlsx

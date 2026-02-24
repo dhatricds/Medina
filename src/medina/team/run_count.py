@@ -22,12 +22,12 @@ logging.basicConfig(
 logger = logging.getLogger("medina.team.count")
 
 
-def run(source: str, work_dir: str, use_vision: bool = False, hints=None) -> dict:
+def run(source: str, work_dir: str, use_vision: bool = False, hints=None,
+        source_key: str = "", project_id: str = "") -> dict:
     """Run stage 5a: FIXTURE COUNTING per plan page."""
     from medina.pdf.loader import load
-    from medina.pdf.classifier import classify_pages
     from medina.plans.text_counter import count_all_plans
-    from medina.models import PageInfo, PageType, SheetIndexEntry
+    from medina.models import PageInfo, PageType
     from medina.config import get_config
 
     source_path = Path(source)
@@ -50,16 +50,14 @@ def run(source: str, work_dir: str, use_vision: bool = False, hints=None) -> dic
         print("No fixture codes to count.")
         return result
 
-    # Reload PDF and classify pages
+    # Reconstruct PageInfo from search_result.json to preserve Fix It
+    # page overrides (re-classifying from scratch would lose them).
+    pages = [PageInfo.model_validate(p) for p in search_data["pages"]]
     logger.info("[COUNT] Loading PDF for fixture counting...")
-    pages, pdf_pages = load(source_path)
-    sheet_index = [
-        SheetIndexEntry.model_validate(e) for e in search_data["sheet_index"]
-    ]
-    pages = classify_pages(pages, pdf_pages, sheet_index)
+    _, pdf_pages = load(source_path)
 
     plan_pages = [p for p in pages if p.page_type == PageType.LIGHTING_PLAN]
-    plan_codes = [p.sheet_code for p in plan_pages if p.sheet_code]
+    plan_codes = [p.sheet_code or f"pg{p.page_number}" for p in plan_pages]
 
     logger.info(
         "[COUNT] Counting %d fixture codes on %d plan pages: %s",
@@ -67,6 +65,14 @@ def run(source: str, work_dir: str, use_vision: bool = False, hints=None) -> dic
         len(plan_pages),
         plan_codes,
     )
+
+    # --- Load runtime params ---
+    rt_params = None
+    try:
+        from medina.runtime_params import get_effective_params
+        rt_params = get_effective_params(source_key=source_key, project_id=project_id)
+    except Exception:
+        pass  # Defaults used when DB not available
 
     # --- Text-based counting ---
     all_plan_counts: dict[str, dict[str, int]] = {}
@@ -84,6 +90,7 @@ def run(source: str, work_dir: str, use_vision: bool = False, hints=None) -> dic
             return_positions=True,
             all_rejected_positions=rejected_pos,
             all_added_positions=added_pos,
+            runtime_params=rt_params,
         )
         if isinstance(counts_result, tuple):
             all_plan_counts, all_plan_positions = counts_result
@@ -116,7 +123,7 @@ def run(source: str, work_dir: str, use_vision: bool = False, hints=None) -> dic
             from medina.pdf.renderer import render_page_to_image
             from medina.plans.vision_counter import count_all_plans_vision
 
-            vision_dpi = min(config.render_dpi, 150)
+            vision_dpi = min(config.render_dpi, rt_params.get("vision_count_dpi", 150) if rt_params else 150)
             page_images: dict[int, bytes] = {}
             for pinfo in plan_pages:
                 try:

@@ -5,9 +5,7 @@ indexed by source file identity (filename).  On every pipeline run, the
 system checks for existing learnings and automatically applies them as hints
 — so corrections made once are never forgotten.
 
-Storage layout:
-    output/learnings/
-        {source_key}.json     # Corrections for a specific source file
+Storage: SQLite DB (primary), output/learnings/*.json (read-only fallback).
 """
 from __future__ import annotations
 
@@ -55,24 +53,60 @@ class LearningEntry(BaseModel):
     times_applied: int = 0
 
 
-def load_learnings(source_path: Path) -> LearningEntry | None:
-    """Load learnings for a source file, if any exist."""
-    key = _source_key(source_path)
-    path = LEARNINGS_DIR / f"{key}.json"
+def _try_db_load(source_key: str) -> LearningEntry | None:
+    """Try loading from DB. Returns None if DB unavailable."""
+    try:
+        from medina.db import repositories as repo
+        row = repo.get_learning(source_key)
+        if row is None:
+            return None
+        corrections = [
+            FixtureFeedback.model_validate(c) if isinstance(c, dict) else c
+            for c in row.get("corrections", [])
+        ]
+        return LearningEntry(
+            source_key=row["source_key"],
+            source_name=row.get("source_name", ""),
+            source_path=row.get("source_path", ""),
+            corrections=corrections,
+            times_applied=row.get("times_applied", 0),
+            created_at=row.get("created_at", ""),
+            updated_at=row.get("updated_at", ""),
+        )
+    except Exception as e:
+        logger.debug("DB load failed for %s, trying file: %s", source_key, e)
+        return None
+
+
+def _try_file_load(source_key: str) -> LearningEntry | None:
+    """Fallback: load from JSON file."""
+    path = LEARNINGS_DIR / f"{source_key}.json"
     if not path.exists():
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        entry = LearningEntry.model_validate(data)
+        return LearningEntry.model_validate(data)
+    except Exception as e:
+        logger.warning("Failed to load learnings file for %s: %s", source_key, e)
+        return None
+
+
+def load_learnings(source_path: Path) -> LearningEntry | None:
+    """Load learnings for a source file, if any exist."""
+    key = _source_key(source_path)
+
+    # Try DB first, fall back to file
+    entry = _try_db_load(key)
+    if entry is None:
+        entry = _try_file_load(key)
+
+    if entry and entry.corrections:
         logger.info(
             "Loaded %d learnings for %s (applied %d times before)",
             len(entry.corrections), entry.source_name, entry.times_applied,
         )
-        return entry
-    except Exception as e:
-        logger.warning("Failed to load learnings for %s: %s", key, e)
-        return None
+    return entry
 
 
 def save_learnings(source_path: Path, corrections: list[FixtureFeedback]) -> None:
@@ -82,9 +116,6 @@ def save_learnings(source_path: Path, corrections: list[FixtureFeedback]) -> Non
     code and action replace old ones (last correction wins).
     """
     key = _source_key(source_path)
-    LEARNINGS_DIR.mkdir(parents=True, exist_ok=True)
-    path = LEARNINGS_DIR / f"{key}.json"
-
     now = datetime.now(timezone.utc).isoformat()
     name = source_path.stem if source_path.is_file() else source_path.name
 
@@ -99,18 +130,56 @@ def save_learnings(source_path: Path, corrections: list[FixtureFeedback]) -> Non
         )
 
     # Merge: new corrections override old ones for same (code, action) pair.
-    # Keep the order: existing first, then new.  Last one wins in derive_hints.
     merged = list(existing.corrections) + list(corrections)
     existing.corrections = merged
     existing.updated_at = now
 
+    # Save to DB (primary)
+    saved_to_db = False
+    try:
+        from medina.db import repositories as repo
+        corrections_data = [
+            c.model_dump() if hasattr(c, "model_dump") else c
+            for c in merged
+        ]
+        repo.upsert_learning(
+            source_key=key,
+            source_name=name,
+            source_path=str(source_path),
+            corrections_json=json.dumps(corrections_data),
+            times_applied=existing.times_applied,
+        )
+        saved_to_db = True
+    except Exception as e:
+        logger.debug("DB save failed, falling back to file: %s", e)
+
+    # Also save to file (backward compat)
+    LEARNINGS_DIR.mkdir(parents=True, exist_ok=True)
+    path = LEARNINGS_DIR / f"{key}.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(existing.model_dump(), f, indent=2)
 
     logger.info(
-        "Saved %d learnings for %s (%s)",
-        len(merged), name, key,
+        "Saved %d learnings for %s (%s, db=%s)",
+        len(merged), name, key, saved_to_db,
     )
+
+    # Store in ChromaDB for semantic search
+    try:
+        from medina.db.vector_store import add_document, CORRECTIONS_COLLECTION
+        for i, corr in enumerate(corrections):
+            text = (
+                f"{corr.action} fixture {corr.fixture_code}: "
+                f"{corr.reason_detail or corr.reason}"
+            )
+            add_document(
+                CORRECTIONS_COLLECTION,
+                f"{key}_{i}_{now}",
+                text,
+                {"source_key": key, "action": corr.action, "fixture_code": corr.fixture_code},
+            )
+    except Exception:
+        pass  # ChromaDB is optional
 
 
 def derive_learned_hints(source_path: Path) -> FeedbackHints | None:
@@ -134,6 +203,14 @@ def derive_learned_hints(source_path: Path) -> FeedbackHints | None:
     # Track usage
     entry.times_applied += 1
     entry.updated_at = datetime.now(timezone.utc).isoformat()
+
+    try:
+        from medina.db import repositories as repo
+        repo.increment_learning_applied(entry.source_key)
+    except Exception:
+        pass
+
+    # Also update file
     LEARNINGS_DIR.mkdir(parents=True, exist_ok=True)
     path = LEARNINGS_DIR / f"{entry.source_key}.json"
     with open(path, "w", encoding="utf-8") as f:
@@ -187,5 +264,11 @@ def merge_hints(base: FeedbackHints | None, overlay: FeedbackHints | None) -> Fe
         if code not in merged.added_positions:
             merged.added_positions[code] = {}
         merged.added_positions[code].update(plans)
+
+    # Page overrides: overlay wins per key
+    merged.page_overrides = {**base.page_overrides, **overlay.page_overrides}
+
+    # Viewport splits: overlay wins per sheet code
+    merged.viewport_splits = {**base.viewport_splits, **overlay.viewport_splits}
 
     return merged

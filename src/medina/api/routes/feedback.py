@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from medina.api.feedback import (
     CorrectionReason,
@@ -12,6 +12,7 @@ from medina.api.feedback import (
     FixtureFeedback,
     ProjectFeedback,
     derive_hints,
+    derive_target,
     load_project_feedback,
     save_project_feedback,
 )
@@ -23,9 +24,9 @@ router = APIRouter(prefix="/api/projects", tags=["feedback"])
 
 
 @router.post("/{project_id}/feedback")
-async def submit_feedback(project_id: str, item: FixtureFeedback):
+async def submit_feedback(project_id: str, request: Request, item: FixtureFeedback):
     """Submit a single correction for a project."""
-    project = get_project(project_id)
+    project = get_project(project_id, tenant_id=getattr(request.state, "tenant_id", "default"))
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -57,7 +58,7 @@ async def submit_feedback(project_id: str, item: FixtureFeedback):
 
 
 @router.get("/{project_id}/feedback")
-async def get_feedback(project_id: str):
+async def get_feedback(project_id: str, request: Request):
     """Get all feedback corrections for a project."""
     feedback = load_project_feedback(project_id)
     if feedback is None:
@@ -70,7 +71,7 @@ async def get_feedback(project_id: str):
 
 
 @router.delete("/{project_id}/feedback/{index}")
-async def remove_feedback(project_id: str, index: int):
+async def remove_feedback(project_id: str, index: int, request: Request):
     """Remove a feedback correction by index."""
     feedback = load_project_feedback(project_id)
     if feedback is None:
@@ -91,9 +92,9 @@ async def remove_feedback(project_id: str, index: int):
 
 
 @router.post("/{project_id}/reprocess")
-async def reprocess_project(project_id: str, background_tasks: BackgroundTasks):
+async def reprocess_project(project_id: str, request: Request, background_tasks: BackgroundTasks):
     """Reprocess a project with accumulated feedback as hints."""
-    project = get_project(project_id)
+    project = get_project(project_id, tenant_id=getattr(request.state, "tenant_id", "default"))
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     if project.status == "running":
@@ -102,6 +103,7 @@ async def reprocess_project(project_id: str, background_tasks: BackgroundTasks):
     # Load and derive hints
     feedback = load_project_feedback(project_id)
     hints = derive_hints(feedback) if feedback else None
+    target = derive_target(feedback.corrections if feedback else [], hints)
 
     # Reset project state for reprocessing
     project.status = "running"
@@ -110,7 +112,9 @@ async def reprocess_project(project_id: str, background_tasks: BackgroundTasks):
     project.event_queue = asyncio.Queue()
 
     from medina.api.orchestrator_wrapper import run_pipeline
-    background_tasks.add_task(run_pipeline, project, hints=hints, is_reprocess=True)
+    background_tasks.add_task(
+        run_pipeline, project, hints=hints, is_reprocess=True, target=target,
+    )
 
     return {
         "project_id": project_id,

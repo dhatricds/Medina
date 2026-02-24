@@ -22,12 +22,14 @@ logging.basicConfig(
 logger = logging.getLogger("medina.team.keynote")
 
 
-def run(source: str, work_dir: str) -> dict:
+_MAX_PLAUSIBLE_KEYNOTE_COUNT = 10  # Single keynote rarely appears >10 times per plan
+
+
+def run(source: str, work_dir: str, source_key: str = "", project_id: str = "", hints=None) -> dict:
     """Run stage 5b: KEYNOTE EXTRACTION AND COUNTING."""
     from medina.pdf.loader import load
-    from medina.pdf.classifier import classify_pages
     from medina.plans.keynotes import extract_all_keynotes
-    from medina.models import PageType, SheetIndexEntry
+    from medina.models import PageInfo, PageType
     from medina.config import get_config
 
     source_path = Path(source)
@@ -41,16 +43,25 @@ def run(source: str, work_dir: str) -> dict:
 
     fixture_codes = schedule_data.get("fixture_codes", [])
 
-    # Reload PDF and classify pages
+    # Load runtime params for keynote thresholds
+    max_plausible = _MAX_PLAUSIBLE_KEYNOTE_COUNT
+    keynote_max_num = 20
+    try:
+        from medina.runtime_params import get_effective_params
+        rt_params = get_effective_params(source_key=source_key, project_id=project_id)
+        max_plausible = rt_params.get("max_plausible_keynote_count", max_plausible)
+        keynote_max_num = rt_params.get("keynote_max_number", keynote_max_num)
+    except Exception:
+        pass
+
+    # Reconstruct PageInfo from search_result.json to preserve Fix It
+    # page overrides (re-classifying from scratch would lose them).
+    pages = [PageInfo.model_validate(p) for p in search_data["pages"]]
     logger.info("[KEYNOTE] Loading PDF for keynote extraction...")
-    pages, pdf_pages = load(source_path)
-    sheet_index = [
-        SheetIndexEntry.model_validate(e) for e in search_data["sheet_index"]
-    ]
-    pages = classify_pages(pages, pdf_pages, sheet_index)
+    _, pdf_pages = load(source_path)
 
     plan_pages = [p for p in pages if p.page_type == PageType.LIGHTING_PLAN]
-    plan_codes = [p.sheet_code for p in plan_pages if p.sheet_code]
+    plan_codes = [p.sheet_code or f"pg{p.page_number}" for p in plan_pages]
 
     logger.info(
         "[KEYNOTE] Extracting keynotes from %d plan pages: %s",
@@ -93,14 +104,24 @@ def run(source: str, work_dir: str) -> dict:
             ]
             total = sum(page_counts.get(n, 0) for n in plan_kn_nums)
             num_keynotes = len(plan_kn_nums) or len(keynote_numbers)
-            # Trigger VLM if total count < number of keynotes
-            # (each keynote should appear at least once on average)
-            if total < num_keynotes:
+            max_single = max(page_counts.values()) if page_counts else 0
+            # Trigger VLM if:
+            # (a) total count too low — each keynote should appear ≥1 on avg
+            # (b) any single keynote count suspiciously high — likely false
+            #     positives from dense line pages (bare circuit numbers
+            #     passing the geometric quadrant check)
+            if total < num_keynotes or max_single > max_plausible:
+                if max_single > max_plausible:
+                    logger.info(
+                        "[KEYNOTE] Plan %s: max keynote count=%d exceeds "
+                        "threshold=%d — triggering VLM verification",
+                        code, max_single, max_plausible,
+                    )
                 plans_needing_vlm.append(pinfo)
 
         if plans_needing_vlm:
             logger.info(
-                "[KEYNOTE] VLM fallback for %d plan(s) with zero counts",
+                "[KEYNOTE] VLM fallback for %d plan(s) with low/suspect counts",
                 len(plans_needing_vlm),
             )
             try:
@@ -144,6 +165,27 @@ def run(source: str, work_dir: str) -> dict:
                     .get(str(kn.number), 0)
                 )
         kn.total = sum(kn.counts_per_plan.values())
+
+    # --- Apply keynote count overrides from user feedback ---
+    if hints and hasattr(hints, "keynote_count_overrides") and hints.keynote_count_overrides:
+        logger.info(
+            "[KEYNOTE] Applying %d keynote count override(s)",
+            len(hints.keynote_count_overrides),
+        )
+        for kn_num, plan_overrides in hints.keynote_count_overrides.items():
+            for plan_code, corrected in plan_overrides.items():
+                # Update all_keynote_counts
+                if plan_code in all_keynote_counts:
+                    all_keynote_counts[plan_code][str(kn_num)] = corrected
+                # Update keynote objects
+                for kn in all_keynotes:
+                    if str(kn.number) == str(kn_num) and plan_code in kn.counts_per_plan:
+                        kn.counts_per_plan[plan_code] = corrected
+                        kn.total = sum(kn.counts_per_plan.values())
+                        logger.info(
+                            "[KEYNOTE] Override: #%s on %s = %d",
+                            kn_num, plan_code, corrected,
+                        )
 
     logger.info(
         "[KEYNOTE] Extracted %d unique keynotes", len(all_keynotes),

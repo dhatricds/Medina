@@ -1,10 +1,28 @@
-import type { ProjectData, Correction, DashboardProject, FixturePosition, FixtureFeedback } from '../types';
+import type { ProjectData, Correction, DashboardProject, FixturePosition, FixtureFeedback, FixItAction, FixItInterpretation, ChatMsg, ChatResponse } from '../types';
 
 const BASE = import.meta.env.VITE_API_URL ?? '';
 
+/**
+ * Handle 401 responses globally: clear auth state and reload to show login.
+ */
+function handle401(res: Response): void {
+  if (res.status === 401) {
+    // Dynamically import to avoid circular deps
+    import('../store/authStore').then(({ useAuthStore }) => {
+      const { isAuthenticated } = useAuthStore.getState();
+      if (isAuthenticated) {
+        useAuthStore.setState({ user: null, isAuthenticated: false, isLoading: false });
+      }
+    });
+  }
+}
+
 export async function fetchJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  const res = await fetch(`${BASE}${path}`, { credentials: 'include' });
+  if (!res.ok) {
+    handle401(res);
+    throw new Error(`${res.status} ${res.statusText}`);
+  }
   return res.json();
 }
 
@@ -12,9 +30,13 @@ export async function postJson<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    handle401(res);
+    throw new Error(`${res.status} ${res.statusText}`);
+  }
   return res.json();
 }
 
@@ -22,9 +44,13 @@ export async function patchJson<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    handle401(res);
+    throw new Error(`${res.status} ${res.statusText}`);
+  }
   return res.json();
 }
 
@@ -46,8 +72,11 @@ export function listSources(): Promise<SourceItem[]> {
 export async function uploadFile(file: File): Promise<{ project_id: string; source: string }> {
   const form = new FormData();
   form.append('file', file);
-  const res = await fetch(`${BASE}/api/upload`, { method: 'POST', body: form });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  const res = await fetch(`${BASE}/api/upload`, { method: 'POST', credentials: 'include', body: form });
+  if (!res.ok) {
+    handle401(res);
+    throw new Error(`${res.status} ${res.statusText}`);
+  }
   return res.json();
 }
 
@@ -94,9 +123,13 @@ export async function downloadCorrectedExcel(
   const res = await fetch(`${BASE}/api/projects/${projectId}/export/excel`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     body: JSON.stringify({ fixtures, keynotes }),
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    handle401(res);
+    throw new Error(`${res.status} ${res.statusText}`);
+  }
   return res.blob();
 }
 
@@ -133,8 +166,11 @@ export function getDashboardProject(id: string): Promise<ProjectData> {
 }
 
 export async function deleteDashboardProject(id: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/dashboard/${id}`, { method: 'DELETE' });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  const res = await fetch(`${BASE}/api/dashboard/${id}`, { method: 'DELETE', credentials: 'include' });
+  if (!res.ok) {
+    handle401(res);
+    throw new Error(`${res.status} ${res.statusText}`);
+  }
 }
 
 export function getDashboardExcelUrl(id: string): string {
@@ -153,8 +189,9 @@ export interface PagePositionsResponse {
   reason?: string;
 }
 
-export function getPagePositions(projectId: string, pageNumber: number): Promise<PagePositionsResponse> {
-  return fetchJson(`/api/projects/${projectId}/page/${pageNumber}/positions`);
+export function getPagePositions(projectId: string, pageNumber: number, sheetCode?: string): Promise<PagePositionsResponse> {
+  const params = sheetCode ? `?sheet_code=${encodeURIComponent(sheetCode)}` : '';
+  return fetchJson(`/api/projects/${projectId}/page/${pageNumber}/positions${params}`);
 }
 
 // --- Feedback ---
@@ -178,8 +215,12 @@ export async function removeFeedback(
 ): Promise<{ project_id: string; removed: FixtureFeedback; correction_count: number }> {
   const res = await fetch(`${BASE}/api/projects/${projectId}/feedback/${index}`, {
     method: 'DELETE',
+    credentials: 'include',
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    handle401(res);
+    throw new Error(`${res.status} ${res.statusText}`);
+  }
   return res.json();
 }
 
@@ -187,6 +228,34 @@ export function reprocessProject(
   projectId: string,
 ): Promise<{ project_id: string; status: string }> {
   return postJson(`/api/projects/${projectId}/reprocess`);
+}
+
+// --- Fix It ---
+
+export function interpretFixIt(projectId: string, text: string): Promise<FixItInterpretation> {
+  return postJson(`/api/projects/${projectId}/fix-it/interpret`, { text });
+}
+
+export function confirmFixIt(projectId: string, actions: FixItAction[]): Promise<{ project_id: string; status: string; actions_applied: number }> {
+  return postJson(`/api/projects/${projectId}/fix-it/confirm`, { actions });
+}
+
+// --- Chat ---
+
+export function getChatHistory(projectId: string): Promise<{ messages: ChatMsg[] }> {
+  return fetchJson(`/api/projects/${projectId}/chat/history`);
+}
+
+export function sendChatMessage(projectId: string, message: string): Promise<ChatResponse> {
+  return postJson(`/api/projects/${projectId}/chat/message`, { message });
+}
+
+export function confirmChatActions(projectId: string, actions: FixItAction[]): Promise<{ project_id: string; status: string; actions_applied: number }> {
+  return postJson(`/api/projects/${projectId}/chat/confirm`, { actions });
+}
+
+export function getChatSuggestions(projectId: string): Promise<{ suggestions: string[] }> {
+  return fetchJson(`/api/projects/${projectId}/chat/suggestions`);
 }
 
 // --- SSE URL ---

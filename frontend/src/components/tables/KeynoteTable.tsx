@@ -1,4 +1,5 @@
 import { useProjectStore } from '../../store/projectStore';
+import { submitFeedback } from '../../api/client';
 import EditableCell from './EditableCell';
 
 export default function KeynoteTable() {
@@ -12,12 +13,24 @@ export default function KeynoteTable() {
   const handleCountChange = (keynoteNumber: string, plan: string, original: number, newCount: number) => {
     updateKeynoteCount(keynoteNumber, plan, newCount);
     addCorrection({ type: 'keynote', identifier: keynoteNumber, sheet: plan, original, corrected: newCount });
+    // Persist keynote correction to backend (fire-and-forget)
+    if (projectId) {
+      submitFeedback(projectId, {
+        action: 'keynote_count_override',
+        fixture_code: `KN-${keynoteNumber}`,
+        reason: 'manual_count_edit',
+        reason_detail: `Keynote #${keynoteNumber} on ${plan}: ${original} -> ${newCount}`,
+        fixture_data: { sheet: plan, corrected: newCount, original, keynote_number: keynoteNumber },
+      }).then(() => {
+        useProjectStore.setState((s) => ({ feedbackCount: s.feedbackCount + 1 }));
+      }).catch(() => {});
+    }
   };
 
-  // Group keynotes by plan — show all keynotes defined on each plan
+  // Group keynotes by plan — show only keynotes with count > 0
   const keynotesByPlan = plans.map((plan) => {
     const planKeynotes = projectData.keynotes.filter(
-      (kn) => kn.counts_per_plan[plan] !== undefined
+      (kn) => (kn.counts_per_plan[plan] ?? 0) > 0
     );
     return { plan, keynotes: planKeynotes };
   });

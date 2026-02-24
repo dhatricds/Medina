@@ -206,9 +206,44 @@ def count_keynotes_vision(
             "anthropic package not installed."
         ) from exc
 
-    # Crop the legend and drawing areas
-    legend_bytes = _crop_legend_area(image_bytes)
-    drawing_bytes = _crop_drawing_area(image_bytes)
+    # For viewport sub-plans, the shared KEYED NOTES legend sits outside
+    # the viewport bbox (e.g., at the far right of the full page).  We
+    # keep the full-page image for the legend crop and use the viewport-
+    # cropped image for the drawing crop.
+    full_page_image = image_bytes
+    viewport_image = image_bytes
+    if page_info.viewport_bbox is not None:
+        try:
+            img = Image.open(io.BytesIO(image_bytes))
+            iw, ih = img.size
+            # Estimate PDF dimensions from image size (assume 200 DPI for keynotes)
+            est_dpi = 200
+            pdf_w = iw * 72 / est_dpi
+            pdf_h = ih * 72 / est_dpi
+            x0, y0, x1, y1 = page_info.viewport_bbox
+            x_scale = iw / pdf_w
+            y_scale = ih / pdf_h
+            crop_box = (
+                int(x0 * x_scale),
+                int(y0 * y_scale),
+                int(x1 * x_scale),
+                int(y1 * y_scale),
+            )
+            cropped = img.crop(crop_box)
+            buf = io.BytesIO()
+            cropped.save(buf, format="PNG")
+            viewport_image = buf.getvalue()
+            logger.debug(
+                "Cropped keynote VLM image to viewport %s for %s",
+                page_info.viewport_bbox, sheet,
+            )
+        except Exception as e:
+            logger.warning("Viewport crop failed for keynote VLM %s: %s", sheet, e)
+
+    # Legend crop from full page (shared notes panel visible).
+    # Drawing crop from viewport image (only this sub-plan's area).
+    legend_bytes = _crop_legend_area(full_page_image)
+    drawing_bytes = _crop_drawing_area(viewport_image)
 
     legend_encoded = base64.b64encode(legend_bytes).decode()
     drawing_encoded = base64.b64encode(drawing_bytes).decode()

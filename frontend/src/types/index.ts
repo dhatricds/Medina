@@ -14,6 +14,7 @@ export interface Fixture {
   cct: string;
   dimming: string;
   max_va: string;
+  schedule_page?: string;
   counts_per_plan: Record<string, number>;
   total: number;
 }
@@ -60,9 +61,14 @@ export interface ProjectData {
   keynotes: Keynote[];
   summary: ProjectSummary;
   qa_report: QAReport | null;
+  /** Maps composite viewport keys (e.g., "E601-L1") to physical page numbers. */
+  viewport_map?: Record<string, number> | null;
 }
 
 export type AgentStatus = 'pending' | 'running' | 'completed' | 'error';
+
+export type CoveStatus = 'idle' | 'running' | 'passed' | 'failed';
+export type PlanStatus = 'idle' | 'planning' | 'ready';
 
 export interface AgentInfo {
   id: number;
@@ -72,6 +78,14 @@ export interface AgentInfo {
   stats: Record<string, string | number>;
   time?: number;
   flags?: string[];
+  /** COVE verification state */
+  coveStatus?: CoveStatus;
+  coveConfidence?: number;
+  coveIssues?: string[];
+  /** Planning state */
+  planStatus?: PlanStatus;
+  planStrategy?: string;
+  planApproach?: string[];
 }
 
 export type AppState = 'empty' | 'demo' | 'files_selected' | 'processing' | 'complete' | 'error';
@@ -95,11 +109,11 @@ export type CorrectionReason =
   | 'other';
 
 export interface FixtureFeedback {
-  action: 'add' | 'remove' | 'update_spec' | 'count_override';
+  action: 'add' | 'remove' | 'update_spec' | 'count_override' | 'reclassify_page' | 'split_page';
   fixture_code: string;
   reason: CorrectionReason;
   reason_detail: string;
-  fixture_data?: Record<string, string | number>;
+  fixture_data?: Record<string, string | number | any[]>;
   spec_patches?: Record<string, string>;
 }
 
@@ -142,4 +156,35 @@ export interface HighlightState {
   addMode: boolean;
 }
 
+export interface FixItAction {
+  action: string;
+  fixture_code: string;
+  reason: string;
+  reason_detail: string;
+  fixture_data: Record<string, any>;
+  spec_patches: Record<string, string>;
+  confidence: number;
+}
+
+export interface FixItInterpretation {
+  actions: FixItAction[];
+  explanation: string;
+  clarification: string;
+}
+
 export type ViewMode = 'workspace' | 'dashboard' | 'dashboard_detail';
+
+export interface ChatMsg {
+  id?: number;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  intent?: string | null;
+  actions?: FixItAction[] | null;
+  created_at?: string;
+}
+
+export interface ChatResponse {
+  message: ChatMsg;
+  needs_confirmation: boolean;
+  highlight?: { fixture_code?: string; keynote_number?: string; plan?: string } | null;
+}
