@@ -189,28 +189,14 @@ symbols, classify it as lighting_plan. If it has multiple lighting viewports \
 plan and an embedded schedule table, classify as lighting_plan (schedule auto-detected).
 
 When the user reports a COUNTING issue (fixture or keynote count wrong/missed/not properly counted):
-- If the user provides a SPECIFIC corrected count (e.g., "B2 should be 25", "there are 3 not 5"):
-  Return a count_override action so the system can reprocess:
-  For fixtures: ```json
-  {"actions": [{"action": "count_override", "fixture_code": "B2", "fixture_data": {"sheet": "E601-L1", "corrected": 25}, "reason": "manual_count_edit"}]}
-  ```
-  For keynotes: ```json
-  {"actions": [{"action": "keynote_count_override", "fixture_code": "KN-3", "fixture_data": {"keynote_number": "3", "sheet": "E601-MEZ", "corrected": 5}, "reason": "manual_count_edit"}]}
-  ```
-- If the user just says something is wrong WITHOUT giving a specific count:
-  Return a highlight instruction to show detected positions on the blueprint, AND a recount action:
-  For fixtures: ```json
-  {"highlight": {"fixture_code": "B2", "plan": "E601-L1"}, "recount": true}
-  ```
-  For keynotes: ```json
-  {"highlight": {"keynote_number": "3", "plan": "E601-MEZ"}, "recount": true}
-  ```
-  Omit "plan" if user didn't specify — system shows first plan with count > 0
+- Do NOT guess the correct count
+- Return a JSON highlight instruction to show detected positions on the blueprint
+- For fixtures: ```json\n{"highlight": {"fixture_code": "B2", "plan": "E601-L1"}}\n```
+- For keynotes: ```json\n{"highlight": {"keynote_number": "3", "plan": "E601-MEZ"}}\n```
+- Omit "plan" if user didn't specify — system shows first plan with count > 0
 - Examples:
-  - "B2 should be 25 on E601-L1" → count_override action with corrected=25
-  - "keynote 5 count is 3 not 5" → keynote_count_override action with corrected=3
-  - "B2 was not properly counted" → highlight with recount=true
-  - "keynote 5 is wrong on E200" → highlight with recount=true
+  - "B2 was not properly counted" → {"highlight": {"fixture_code": "B2"}}
+  - "keynote 5 is wrong on E200" → {"highlight": {"keynote_number": "5", "plan": "E200"}}
 
 When the user wants a STRUCTURAL CORRECTION (page not processed, wrong type):
 - Return a JSON block with structured actions. Wrap in ```json ... ```
@@ -571,26 +557,9 @@ async def process_chat_message(
                 parsed = json.loads(json_str)
 
                 if "highlight" in parsed:
-                    # Highlight instruction — show positions on PDF
+                    # Highlight instruction — immediate, no confirmation
                     highlight = parsed["highlight"]
                     intent = "correction"
-                    # If LLM also set "recount": true, build a recount
-                    # action so the frontend shows a confirm button.
-                    if parsed.get("recount"):
-                        code = (highlight.get("fixture_code")
-                                or highlight.get("keynote_number") or "")
-                        plan = highlight.get("plan") or ""
-                        is_keynote = "keynote_number" in highlight
-                        recount_target = frozenset({4, 5}) if is_keynote else frozenset({3, 5})
-                        recount_label = f"keynote {code}" if is_keynote else f"fixture {code}"
-                        actions = [FixItAction(
-                            action="reprocess",
-                            fixture_code=code,
-                            reason="other",
-                            reason_detail=f"Recount {recount_label}" + (f" on {plan}" if plan else ""),
-                            fixture_data={"target": sorted(recount_target), "use_vision": True},
-                        )]
-                        needs_confirmation = True
                 elif "actions" in parsed:
                     # Correction actions — LLM may omit fields that
                     # FixItAction requires, so fill in sensible defaults.
@@ -660,15 +629,7 @@ async def process_chat_message(
 
         # If LLM returned only a JSON block, provide a user-friendly message
         if not display_text:
-            if highlight and actions:
-                code = highlight.get("fixture_code") or highlight.get("keynote_number", "")
-                plan = highlight.get("plan", "")
-                plan_msg = f" on {plan}" if plan else ""
-                display_text = (
-                    f"Highlighting {code}{plan_msg} on the blueprint. "
-                    "Review the markers, then confirm below to recount with vision."
-                )
-            elif highlight:
+            if highlight:
                 code = highlight.get("fixture_code") or highlight.get("keynote_number", "")
                 plan = highlight.get("plan", "")
                 plan_msg = f" on {plan}" if plan else ""

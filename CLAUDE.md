@@ -1,8 +1,8 @@
-# CLAUDE.md - CDS Vision: Blueprint Estimation System
+# CLAUDE.md - Medina: Lighting Fixture Inventory Extraction System
 
 ## Project Overview
 
-CDS Vision is a Python-based system that automatically extracts lighting fixture inventory data from electrical construction drawing PDFs. It processes engineering plans to produce a structured inventory spreadsheet containing fixture types, specifications, and counts.
+Medina is a Python-based system that automatically extracts lighting fixture inventory data from electrical construction drawing PDFs. It processes engineering plans to produce a structured inventory spreadsheet containing fixture types, specifications, and counts.
 
 **Primary goal:** Given a set of electrical construction PDF drawings, produce an Excel/JSON inventory listing every lighting fixture type with its full specifications and total count across all plan pages.
 
@@ -324,7 +324,7 @@ Medina/
 │           ├── layout/          # TopBar, BottomBar, ThreePanel
 │           ├── pdf/             # UploadZone, PdfViewer
 │           ├── agents/          # AgentPipeline, AgentCard
-│           ├── tables/          # TabContainer, FixtureTable, KeynoteTable, EditableCell, FixItPanel, AddFixtureModal, AddKeynoteModal
+│           ├── tables/          # TabContainer, FixtureTable, KeynoteTable, EditableCell, FixItPanel
 │           ├── qa/              # WarningModal
 │           ├── upload/          # SourcePicker
 │           └── dashboard/       # DashboardView (card grid), DashboardDetail (project detail)
@@ -949,7 +949,7 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 | A1 | 48 | 48 | Match |
 | A6 | 14 | 14 | Match |
 | B1 | 4 | 4 | Match |
-| B6 | 26 | 26 | Match |
+| B6 | 25 | 25 | Match |
 | C4 | 1 | 1 | Match |
 | D6 | 8 | N/A | Extra type in schedule |
 | D7 | 1 | 1 | Match |
@@ -1043,15 +1043,13 @@ MEDINA_ANTHROPIC_API_KEY=sk-... pytest   # Full suite
 13. **Search cache invalidation on page overrides**: When `reclassify_page` corrections are present, the search agent must re-run (no cache) because page classifications have changed. This is checked via `has_page_overrides` flag independent of `is_reprocess`.
 14. **Multi-viewport auto-detection with conservative guards**: Auto-detect scans bottom 15% (excluding rightmost 25% title block) for lighting plan titles. Requires minimum 20% page-width horizontal separation between viewport centers to avoid false positives from title block text appearing twice (e.g., "LIGHTING PLAN" in both the footer and the title block box). Empty `viewport_splits[]` sentinel in hints triggers auto-detection.
 15. **Count/keynote agents read from search_result.json**: Instead of re-loading and re-classifying pages (which loses Fix It page overrides), agents reconstruct PageInfo objects from the cached search result. Only PDF page objects are re-loaded for pdfplumber access.
-16. **Shape quality check on all pages**: Polygon closure analysis (`_check_shape_quality()`) runs on ALL pages, not just dense ones (>10k lines). Non-dense pages (1k–10k lines) are equally susceptible to false keynote detections from stray line endpoints near bare numbers. The check validates segment count (4–12), shared vertices (≥2), and midpoint distance consistency (std < 2.0).
-17. **VLM model selection**: Default VLM is `claude-sonnet-4-6` (not Opus) for cost efficiency. VLM calls are rare — only triggered as fallback when geometric detection finds all zeros or suspiciously high counts.
 
 ## Known Challenges
 
 1. **Sheet index format variability** — SOLVED: Multiple parsing strategies (table extraction, text-based regex, two-column layout) with graceful fallback.
 2. **Table variability** — SOLVED: Flexible column mapper with fuzzy matching. VLM fallback for image-based tables.
 3. **Fixture symbol recognition** — SOLVED: Spatial filtering excludes title block (rightmost ~25%), border areas, and notes sections.
-4. **Key notes parsing** — SOLVED: Geometric shape detection (diamond/hexagon enclosure) with font_h modal filtering and polygon closure validation on ALL pages (not just dense). "KEY NOTES:", "KEYED NOTES:", and "KEYED SHEET NOTES" header patterns supported.
+4. **Key notes parsing** — SOLVED: Geometric shape detection (diamond/hexagon enclosure) with font_h modal filtering. "KEY NOTES:", "KEYED NOTES:", and "KEYED SHEET NOTES" header patterns supported.
 5. **Dynamic column generation** — SOLVED: Excel and JSON handle variable numbers of plan columns.
 6. **Scanned vs vector PDFs** — PARTIALLY SOLVED: VLM fallback for image-based schedules. OCR fallback available via pytesseract.
 7. **Cross-document context** — SOLVED: Sheet index from cover page ties together fixture codes across separate plan/schedule PDFs in folder input.
@@ -1324,62 +1322,3 @@ global_patterns → learned_hints → explicit_feedback
 ```
 
 **Key File:** `src/medina/api/patterns.py` — Pattern detection engine (deterministic Python, not LLM)
-
-### Authentication & Password Reset
-
-**JWT-based authentication** with multi-tenant isolation. Users register with email + company name → creates tenant + user.
-
-**Password Reset Flow:**
-1. User clicks "Forgot password?" on login page
-2. `POST /api/auth/forgot-password` creates a token (1hr expiry), logs it to server console (no email service yet)
-3. User enters token on reset form
-4. `POST /api/auth/reset-password` validates token, updates password, marks token used
-
-**DB table:** `password_reset_tokens` (user_id, token, expires_at, used)
-
-**Public endpoints** (no JWT required): `/api/auth/login`, `/api/auth/register`, `/api/auth/forgot-password`, `/api/auth/reset-password` — configured in `_PUBLIC_API_PATHS` in `src/medina/api/main.py`.
-
-**Key Files:**
-- `src/medina/api/auth.py` — `create_reset_token()`, `reset_password()`
-- `src/medina/api/routes/auth.py` — forgot-password + reset-password endpoints
-- `frontend/src/store/authStore.ts` — `forgotPassword()`, `resetPassword()` actions
-- `frontend/src/components/auth/LoginPage.tsx` — 4-tab login page (login, register, forgot, reset)
-
-### Branding
-
-- **CDS Vision logo**: `frontend/public/cds-vision-logo.png` — displayed on both login page and TopBar
-- **"Blueprint Estimation System"** header text: dark navy blue (`text-primary` = `#1e3a5f`) on login page, white on TopBar (dark background)
-- Logo files: `CDS_logo_bluw.png` (project root, original) → copied to `frontend/public/cds-vision-logo.png`
-
-### Keynote Correction UI
-
-Full parity with fixture corrections:
-
-| Feature | Fixtures | Keynotes |
-|---------|----------|----------|
-| Add new | "Add Fixture" modal | "Add Keynote" modal |
-| Delete | Trash icon (two-click confirm) | Trash icon (two-click confirm) |
-| Edit count | Click cell to edit | Click cell to edit |
-| Locate on PDF | Click Type or Locate button | Click # or Locate button |
-| Toggle markers | Click markers to reject/accept | Click markers to reject/accept |
-| Add position | Add mode (crosshair click) | Add mode (crosshair click) |
-| Bounding box color | Red | Blue |
-
-**Key Files:**
-- `frontend/src/components/tables/KeynoteTable.tsx` — delete button, count editing, highlight
-- `frontend/src/components/tables/AddKeynoteModal.tsx` — add missing keynote modal
-- `frontend/src/components/tables/TabContainer.tsx` — context-aware toolbar (Add Fixture vs Add Keynote)
-- `frontend/src/store/projectStore.ts` — `removeKeynoteFeedback()` action
-- `frontend/src/components/pdf/FixtureOverlay.tsx` — blue bounding boxes for keynotes
-
-### Shape Quality Check on All Pages (Keynote False Positive Fix)
-
-Previously, the polygon closure analysis (`_check_shape_quality()`) only ran on dense pages (>10k lines). On non-dense pages (1k–10k lines), bare numbers near walls/conduit/grid lines could pass the quadrant check with 3+ quadrants and matching font size, producing false keynote detections.
-
-**Fix:** Shape quality check now runs on ALL pages regardless of line count. The check validates that nearby line segments form a coherent polygon (4–12 edges, ≥2 shared vertices, std midpoint distance < 2.0) before accepting a candidate.
-
-**Regression tested:** All 5 training PDFs produce identical results after the change.
-
-### VLM Model
-
-Default VLM switched from `claude-opus-4-6` to `claude-sonnet-4-6` in `src/medina/config.py` — cheaper while still capable for fallback counting tasks. VLM is only used as fallback (geometric detection is primary for keynotes).

@@ -29,7 +29,10 @@ export default function TopBar() {
     <div className="bg-primary text-white px-6 py-3 flex items-center justify-between shadow-lg z-50">
       <div className="flex items-center gap-4">
         <div className="flex items-center gap-2.5 text-lg font-bold tracking-tight">
-          <img src="/cds-vision-logo.png" className="h-7 w-auto" alt="CDS Vision" />
+          <svg viewBox="0 0 28 28" fill="none" className="w-7 h-7">
+            <rect width="28" height="28" rx="6" fill="#e8942e" />
+            <path d="M7 14h14M14 7v14M9 9l10 10M19 9L9 19" stroke="white" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
           Blueprint Estimation System
         </div>
 

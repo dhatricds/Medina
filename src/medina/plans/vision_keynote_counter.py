@@ -7,6 +7,7 @@ symbol style used, then count those symbols on the plan.
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import logging
@@ -17,59 +18,9 @@ from PIL import Image
 
 from medina.config import MedinaConfig, get_config
 from medina.exceptions import VisionAPIError
-
 from medina.models import PageInfo
 
 logger = logging.getLogger(__name__)
-
-
-def _extract_json_block(text: str) -> str | None:
-    """Extract JSON object string from VLM response text.
-
-    Tries multiple strategies:
-    1. Content between ```json and ``` fences (string-based, not regex)
-    2. Content between ``` and ``` fences
-    3. Brace-matched extraction from raw text
-    """
-    # Strategy 1: ```json ... ``` fences
-    if "```json" in text:
-        try:
-            start = text.index("```json") + 7
-            end = text.index("```", start)
-            candidate = text[start:end].strip()
-            if candidate.startswith("{"):
-                return candidate
-        except ValueError:
-            pass
-
-    # Strategy 2: ``` ... ``` fences (without json tag)
-    if "```" in text:
-        try:
-            start = text.index("```") + 3
-            nl = text.find("\n", start)
-            if nl != -1 and nl - start < 10:
-                start = nl + 1
-            end = text.index("```", start)
-            candidate = text[start:end].strip()
-            if candidate.startswith("{"):
-                return candidate
-        except ValueError:
-            pass
-
-    # Strategy 3: Find outermost { ... } using brace counting
-    brace_start = text.find("{")
-    if brace_start == -1:
-        return None
-    depth = 0
-    for i in range(brace_start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return text[brace_start : i + 1]
-
-    return None
 
 
 def _build_prompt(
@@ -134,13 +85,22 @@ def _parse_response(
     keynote_numbers: list[str],
 ) -> dict[str, int]:
     """Parse the JSON keynote counts from the VLM response."""
-    json_str = _extract_json_block(response_text)
-    if json_str is None:
-        logger.warning(
-            "Could not find JSON in keynote VLM response: %s",
-            response_text[:200],
-        )
-        return {n: 0 for n in keynote_numbers}
+    # Try code fences first.
+    fence_match = re.search(
+        r'```(?:json)?\s*(\{[^{}]*\})\s*```', response_text, re.DOTALL
+    )
+    if fence_match:
+        json_str = fence_match.group(1)
+    else:
+        brace_match = re.search(r'\{[^{}]*\}', response_text, re.DOTALL)
+        if brace_match:
+            json_str = brace_match.group(0)
+        else:
+            logger.warning(
+                "Could not find JSON in keynote VLM response: %s",
+                response_text[:200],
+            )
+            return {n: 0 for n in keynote_numbers}
 
     try:
         data = json.loads(json_str)
@@ -199,261 +159,6 @@ def _crop_drawing_area(image_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 
-def _build_extract_and_count_prompt(sheet_code: str) -> str:
-    """Build prompt for full VLM keynote extraction (text + counts).
-
-    Used as fallback when text-based extraction fails (garbled text,
-    non-standard format, scanned pages).  Asks VLM to both READ the
-    keynote definitions AND COUNT the symbols on the floor plan.
-    """
-    return (
-        "RESPOND WITH ONLY A JSON OBJECT. NO EXPLANATIONS. NO THINKING. "
-        "JUST THE JSON.\n\n"
-        f"Analyze this electrical plan (sheet {sheet_code}). "
-        "Find the KEY NOTES / KEYNOTES / KEYED NOTES section (right side "
-        "of drawing). Extract each numbered entry and count how many times "
-        "each keynote number appears inside a geometric shape (diamond, "
-        "hexagon, circle) on the floor plan. Do NOT count bare numbers "
-        "(circuit numbers, panel IDs, room labels).\n\n"
-        "JSON format:\n"
-        '{"keynotes": ['
-        '{"number": "1", "text": "Brief description (first sentence)", '
-        '"count": 3}, '
-        '{"number": "2", "text": "Brief description", "count": 1}'
-        "]}\n\n"
-        "Rules: Include ALL keynotes. Keep text to first sentence only "
-        "(max ~80 chars). Set count=0 if not found on floor plan.\n"
-    )
-
-
-def _extract_json_from_response(response_text: str) -> Any:
-    """Extract JSON data from VLM response, handling various formats.
-
-    VLMs may return:
-    1. ```json {"keynotes": [...]} ```  — standard wrapped JSON
-    2. ```json "keynotes": [...] ```    — bare key-value without {}
-    3. ```json [...] ```                — bare array
-    4. Raw JSON without fences
-    """
-    # Strategy 1: Standard JSON block extraction
-    json_str = _extract_json_block(response_text)
-    if json_str is not None:
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            pass
-
-    # Strategy 2: Code fence with bare content (no outer {})
-    for fence_marker in ("```json", "```"):
-        if fence_marker in response_text:
-            try:
-                start = response_text.index(fence_marker) + len(fence_marker)
-                end = response_text.index("```", start)
-                candidate = response_text[start:end].strip()
-                # Try wrapping in {} if it looks like key-value pairs
-                if candidate.startswith('"'):
-                    wrapped = "{" + candidate + "}"
-                    try:
-                        return json.loads(wrapped)
-                    except json.JSONDecodeError:
-                        pass
-                # Try as bare array
-                if candidate.startswith("["):
-                    try:
-                        return json.loads(candidate)
-                    except json.JSONDecodeError:
-                        pass
-            except ValueError:
-                pass
-
-    # Strategy 3: Find any [ ... ] array in the text
-    bracket_start = response_text.find("[")
-    if bracket_start != -1:
-        depth = 0
-        for i in range(bracket_start, len(response_text)):
-            if response_text[i] == "[":
-                depth += 1
-            elif response_text[i] == "]":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(
-                            response_text[bracket_start : i + 1]
-                        )
-                    except json.JSONDecodeError:
-                        break
-
-    # Strategy 4: Truncated response recovery
-    # VLM may have been cut off by max_tokens. Try to recover
-    # partial JSON by finding valid entries in the response.
-    # Look for the keynotes array start and recover complete entries.
-    kn_start = response_text.find('"keynotes"')
-    if kn_start == -1:
-        kn_start = response_text.find("'keynotes'")
-    if kn_start != -1:
-        arr_start = response_text.find("[", kn_start)
-        if arr_start != -1:
-            # Find all complete {...} objects within the truncated array
-            recovered: list[dict] = []
-            depth = 0
-            obj_start = -1
-            for i in range(arr_start + 1, len(response_text)):
-                if response_text[i] == "{":
-                    if depth == 0:
-                        obj_start = i
-                    depth += 1
-                elif response_text[i] == "}":
-                    depth -= 1
-                    if depth == 0 and obj_start >= 0:
-                        try:
-                            obj = json.loads(
-                                response_text[obj_start : i + 1]
-                            )
-                            recovered.append(obj)
-                        except json.JSONDecodeError:
-                            pass
-                        obj_start = -1
-            if recovered:
-                logger.info(
-                    "Recovered %d entries from truncated VLM response",
-                    len(recovered),
-                )
-                return {"keynotes": recovered}
-
-    return None
-
-
-def _parse_extract_response(
-    response_text: str,
-) -> list[dict[str, Any]]:
-    """Parse VLM response for full keynote extraction.
-
-    Returns list of {"number": str, "text": str, "count": int} dicts.
-    Handles various response formats from different VLM providers.
-    """
-    data = _extract_json_from_response(response_text)
-    if data is None:
-        logger.warning(
-            "Could not find JSON in VLM extract response: %s",
-            response_text[:300],
-        )
-        return []
-
-    if isinstance(data, dict):
-        entries = data.get("keynotes", [])
-    elif isinstance(data, list):
-        entries = data
-    else:
-        return []
-
-    result: list[dict[str, Any]] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        num = str(entry.get("number", ""))
-        text = str(entry.get("text", ""))
-        try:
-            count = int(entry.get("count", 0))
-        except (ValueError, TypeError):
-            count = 0
-
-        if num and text and len(text) >= 10:
-            result.append({"number": num, "text": text, "count": count})
-
-    return result
-
-
-def extract_and_count_keynotes_vlm(
-    page_info: PageInfo,
-    image_bytes: bytes,
-    config: MedinaConfig | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """VLM-based full keynote extraction AND counting.
-
-    Fallback for when text-based extraction fails (garbled text,
-    non-standard format, scanned/image-only pages).  Uses VLM to
-    both READ the keynote definitions and COUNT the symbols.
-
-    Args:
-        page_info: Page metadata.
-        image_bytes: PNG image bytes of the full rendered page.
-        config: Configuration with API key and model settings.
-
-    Returns:
-        Tuple of (keynote_entries, counts) where:
-        - keynote_entries = [{"number": "1", "text": "..."}, ...]
-        - counts = {"1": 3, "2": 1, ...}
-
-    Raises:
-        VisionAPIError: If the API call fails.
-    """
-    if config is None:
-        config = get_config()
-
-    sheet = page_info.sheet_code or f"page_{page_info.page_number}"
-    logger.info("VLM full keynote extraction on plan %s", sheet)
-
-    from medina.vlm_client import get_vlm_client
-
-    prompt = _build_extract_and_count_prompt(sheet)
-
-    client = get_vlm_client(config)
-    response_text = client.vision_query(
-        [image_bytes], prompt, max_tokens=8192, temperature=0,
-    )
-
-    if not response_text:
-        logger.warning("Empty VLM response for keynote extraction on %s", sheet)
-        return [], {}
-
-    logger.debug("VLM extract response for %s: %s", sheet, response_text[:500])
-
-    entries = _parse_extract_response(response_text)
-
-    # If primary VLM returned nothing, try fallback provider
-    if not entries:
-        from medina.vlm_client import get_fallback_vlm_client
-
-        fallback = get_fallback_vlm_client(config)
-        if fallback:
-            logger.info(
-                "VLM keynote extract primary returned nothing for %s — "
-                "trying %s fallback", sheet, fallback.provider,
-            )
-            try:
-                fb_text = fallback.vision_query(
-                    [image_bytes], prompt, max_tokens=4000, temperature=0,
-                )
-                if fb_text:
-                    entries = _parse_extract_response(fb_text)
-                    if entries:
-                        logger.info(
-                            "VLM keynote extract fallback (%s) found %d "
-                            "entries for %s",
-                            fallback.provider, len(entries), sheet,
-                        )
-            except Exception as e:
-                logger.warning(
-                    "VLM keynote extract fallback failed for %s: %s", sheet, e,
-                )
-
-    if not entries:
-        logger.warning("VLM found no keynote entries on %s", sheet)
-        return [], {}
-
-    # Build results
-    keynote_entries = [
-        {"number": e["number"], "text": e["text"]} for e in entries
-    ]
-    counts = {e["number"]: e["count"] for e in entries}
-
-    logger.info(
-        "VLM extracted %d keynotes from %s: %s",
-        len(entries), sheet, counts,
-    )
-    return keynote_entries, counts
-
-
 def count_keynotes_vision(
     page_info: PageInfo,
     image_bytes: bytes,
@@ -489,7 +194,17 @@ def count_keynotes_vision(
     if not keynote_numbers:
         return {}
 
-    from medina.vlm_client import get_vlm_client
+    if not config.anthropic_api_key:
+        raise VisionAPIError(
+            "Anthropic API key not configured for VLM keynote counting."
+        )
+
+    try:
+        from anthropic import Anthropic
+    except ImportError as exc:
+        raise VisionAPIError(
+            "anthropic package not installed."
+        ) from exc
 
     # For viewport sub-plans, the shared KEYED NOTES legend sits outside
     # the viewport bbox (e.g., at the far right of the full page).  We
@@ -530,12 +245,54 @@ def count_keynotes_vision(
     legend_bytes = _crop_legend_area(full_page_image)
     drawing_bytes = _crop_drawing_area(viewport_image)
 
+    legend_encoded = base64.b64encode(legend_bytes).decode()
+    drawing_encoded = base64.b64encode(drawing_bytes).decode()
+
     prompt = _build_prompt(keynote_numbers, sheet)
 
-    client = get_vlm_client(config)
-    response_text = client.vision_query(
-        [legend_bytes, drawing_bytes], prompt, max_tokens=4000, temperature=0,
-    )
+    try:
+        client = Anthropic(api_key=config.anthropic_api_key)
+        message = client.messages.create(
+            model=config.vision_model,
+            max_tokens=4000,
+            temperature=0,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": legend_encoded,
+                            },
+                        },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": drawing_encoded,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt,
+                        },
+                    ],
+                }
+            ],
+        )
+    except Exception as exc:
+        raise VisionAPIError(
+            f"VLM keynote counting API call failed for {sheet}: {exc}"
+        ) from exc
+
+    response_text = ""
+    for block in message.content:
+        if hasattr(block, "text"):
+            response_text += block.text
 
     if not response_text:
         logger.warning(
@@ -549,35 +306,6 @@ def count_keynotes_vision(
     counts = _parse_response(response_text, keynote_numbers)
 
     total = sum(counts.values())
-
-    # If primary VLM returned no usable JSON, try fallback provider
-    if total == 0 and _extract_json_block(response_text) is None:
-        from medina.vlm_client import get_fallback_vlm_client
-
-        fallback = get_fallback_vlm_client(config)
-        if fallback:
-            logger.info(
-                "VLM keynote primary returned no JSON for %s — trying %s fallback",
-                sheet, fallback.provider,
-            )
-            try:
-                fb_text = fallback.vision_query(
-                    [legend_bytes, drawing_bytes], prompt,
-                    max_tokens=4000, temperature=0,
-                )
-                if fb_text:
-                    fb_counts = _parse_response(fb_text, keynote_numbers)
-                    fb_total = sum(fb_counts.values())
-                    if fb_total > 0 or _extract_json_block(fb_text) is not None:
-                        counts = fb_counts
-                        total = fb_total
-                        logger.info(
-                            "VLM keynote fallback (%s) for %s: %d total",
-                            fallback.provider, sheet, fb_total,
-                        )
-            except Exception as e:
-                logger.warning("VLM keynote fallback failed for %s: %s", sheet, e)
-
     logger.info(
         "VLM plan %s: found %d total keynote symbols across %d types",
         sheet, total, sum(1 for c in counts.values() if c > 0),

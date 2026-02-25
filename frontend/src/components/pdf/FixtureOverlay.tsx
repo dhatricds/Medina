@@ -76,10 +76,10 @@ export default function FixtureOverlay({ renderedWidth, renderedHeight }: Props)
 
         const borderColor = rejected
           ? 'border-gray-400'
-          : isKeynote ? 'border-blue-500' : 'border-red-500';
+          : isKeynote ? 'border-amber-400' : 'border-red-500';
         const bgColor = rejected
           ? 'bg-gray-400/10'
-          : isKeynote ? 'bg-blue-500/25' : 'bg-red-500/20';
+          : isKeynote ? 'bg-amber-400/20' : 'bg-red-500/20';
 
         return (
           <div

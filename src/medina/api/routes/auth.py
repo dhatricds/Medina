@@ -9,16 +9,10 @@ from medina.api.auth import (
     User,
     authenticate_user,
     create_access_token,
-    create_reset_token,
     get_current_user,
     register_user,
-    reset_password,
 )
 from medina.config import get_config
-
-import logging
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -36,15 +30,6 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
-
-
-class ForgotPasswordRequest(BaseModel):
-    email: str
-
-
-class ResetPasswordRequest(BaseModel):
-    token: str
-    new_password: str
 
 
 class UserResponse(BaseModel):
@@ -125,28 +110,3 @@ async def me(user: User = Depends(get_current_user)):
         tenant_id=user.tenant_id,
         tenant_name=user.tenant_name,
     )
-
-
-@router.post("/forgot-password")
-async def forgot_password(body: ForgotPasswordRequest):
-    """Request a password reset. Always returns success (no email enumeration)."""
-    token = create_reset_token(body.email)
-    if token:
-        logger.info("Password reset token for %s: %s", body.email, token)
-    return {
-        "ok": True,
-        "message": "If an account with that email exists, a reset link has been sent.",
-    }
-
-
-@router.post("/reset-password")
-async def do_reset_password(body: ResetPasswordRequest):
-    """Reset password using a valid token."""
-    from fastapi import HTTPException
-
-    if len(body.new_password) < 6:
-        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
-    success = reset_password(body.token, body.new_password)
-    if not success:
-        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
-    return {"ok": True, "message": "Password has been reset. You can now sign in."}

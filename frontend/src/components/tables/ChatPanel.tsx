@@ -80,13 +80,11 @@ export default function ChatPanel() {
         } else if (resp.highlight.keynote_number) {
           store.highlightKeynote(resp.highlight.keynote_number, resp.highlight.plan);
         }
-        // Only minimize chat if there are NO pending actions to confirm
-        if (!resp.needs_confirmation) {
-          store.setChatOpen(false);
-        }
+        // Minimize chat so user can see PDF + markers
+        store.setChatOpen(false);
       }
 
-      // If actions need confirmation (count_override, reclassify, recount, etc.)
+      // If actions need confirmation
       if (resp.needs_confirmation && resp.message?.actions?.length) {
         setPendingActions(resp.message.actions);
       }
