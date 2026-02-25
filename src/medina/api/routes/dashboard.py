@@ -383,20 +383,6 @@ async def approve_project(project_id: str, request: Request, body: ApproveReques
     qa = save_data.get("qa_report")
     now = datetime.now(timezone.utc).isoformat()
 
-    # Persist source_path, pages, total_pages, output_path, and work_dir
-    # into the dashboard JSON so we can re-open for editing later.
-    if project.source_path:
-        save_data["source_path"] = str(project.source_path)
-    if project.output_path:
-        save_data["output_path"] = str(project.output_path)
-    if project.work_dir:
-        save_data["work_dir"] = str(project.work_dir)
-    if project.result_data:
-        if "pages" in project.result_data:
-            save_data["pages"] = project.result_data["pages"]
-        if "total_pages" in project.result_data:
-            save_data["total_pages"] = project.result_data["total_pages"]
-
     entry = {
         "id": dashboard_id,
         "name": project_name,
@@ -408,7 +394,6 @@ async def approve_project(project_id: str, request: Request, body: ApproveReques
         "plan_count": summary.get("total_lighting_plans", 0),
         "qa_score": qa.get("overall_confidence") if qa else None,
         "qa_passed": qa.get("passed") if qa else None,
-        "source_path": str(project.source_path) if project.source_path else None,
     }
     index.append(entry)
     _write_index(index)
@@ -439,105 +424,3 @@ async def delete_dashboard_project(dashboard_id: str, request: Request):
             file_path.unlink()
 
     return {"deleted": dashboard_id}
-
-
-@router.post("/{dashboard_id}/to-workspace")
-async def load_to_workspace(dashboard_id: str, request: Request):
-    """Load a dashboard project back into the workspace for editing.
-
-    Creates an in-memory ProjectState so the full workspace (PDF viewer,
-    editable tables, marker overlay) works as if the project was just processed.
-    """
-    from medina.api.projects import create_project
-
-    tenant_id = getattr(request.state, "tenant_id", "default")
-
-    # Verify ownership
-    index = _read_index()
-    entry = next((e for e in index if e["id"] == dashboard_id), None)
-    if not entry or entry.get("tenant_id", "default") != tenant_id:
-        raise HTTPException(status_code=404, detail="Dashboard project not found")
-
-    # Load dashboard JSON
-    project_path = DASHBOARD_DIR / f"{dashboard_id}.json"
-    if not project_path.exists():
-        raise HTTPException(status_code=404, detail="Dashboard project data not found")
-    with open(project_path) as f:
-        data = json.load(f)
-
-    # Resolve source_path — check index entry, JSON data, then try data/ folder
-    source_path_str = entry.get("source_path") or data.get("source_path")
-    source_available = False
-    source_path = None
-    if source_path_str:
-        source_path = Path(source_path_str)
-        source_available = source_path.exists()
-
-    # Backfill: if no stored source_path, try to find in data/ by project name
-    if not source_available:
-        data_dir = Path(__file__).resolve().parents[4] / "data"
-        project_name = data.get("project_name", "")
-        if data_dir.exists() and project_name:
-            # Try exact filename match (with .pdf extension)
-            candidate = data_dir / f"{project_name}.pdf"
-            if candidate.exists():
-                source_path = candidate
-                source_available = True
-            else:
-                # Try substring match in data/ files and folders
-                for item in data_dir.iterdir():
-                    if project_name.lower() in item.name.lower():
-                        source_path = item
-                        source_available = True
-                        break
-
-    # Create a project state in memory
-    project = create_project(
-        source_path=source_path or Path("unknown"),
-        tenant_id=tenant_id,
-    )
-    project.status = "completed"
-    project.result_data = data
-
-    # Restore output_path and work_dir so positions/highlights work
-    output_dir = Path(__file__).resolve().parents[4] / "output"
-    if data.get("output_path"):
-        project.output_path = data["output_path"]
-    else:
-        # Backfill: find matching positions file by project name
-        project_name = data.get("project_name", "")
-        if project_name:
-            for pos_file in output_dir.glob("*_positions.json"):
-                # positions file is {output_path}_positions.json
-                base = pos_file.name.replace("_positions.json", "")
-                # Check if a matching .json result file exists
-                result_json = output_dir / f"{base}.json"
-                if result_json.exists():
-                    try:
-                        with open(result_json) as rf:
-                            rdata = json.load(rf)
-                        if rdata.get("project_name") == project_name:
-                            project.output_path = str(output_dir / base)
-                            logger.info("Backfilled output_path for %s: %s", project_name, project.output_path)
-                            break
-                    except Exception:
-                        continue
-    if data.get("work_dir"):
-        project.work_dir = data["work_dir"]
-
-    # Compute total_pages
-    total_pages = data.get("total_pages", 0)
-    if not total_pages:
-        pages = data.get("pages", [])
-        if pages:
-            total_pages = len(pages)
-        else:
-            total_pages = len(data.get("sheet_index", []))
-
-    return {
-        "project_id": project.project_id,
-        "data": data,
-        "total_pages": total_pages,
-        "source_available": source_available,
-        "dashboard_id": dashboard_id,
-    }

@@ -16,7 +16,6 @@ dependencies = [
     "streamlit>=1.30",
     "python-dotenv>=1.0",
     "opencv-python-headless>=4.13.0.92",
-    "google-genai>=1.0",
 ]
 
 [project.optional-dependencies]

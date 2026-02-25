@@ -49,8 +49,9 @@ def _is_valid_fixture_code(code: str) -> bool:
 def run(source: str, work_dir: str, hints=None, source_key: str = "", project_id: str = "") -> dict:
     """Run stage 4: SCHEDULE EXTRACTION."""
     from medina.pdf.loader import load
+    from medina.pdf.classifier import classify_pages
     from medina.schedule.parser import parse_all_schedules
-    from medina.models import PageInfo, PageType
+    from medina.models import PageInfo, PageType, SheetIndexEntry
     from medina.config import get_config
 
     source_path = Path(source)
@@ -62,28 +63,25 @@ def run(source: str, work_dir: str, hints=None, source_key: str = "", project_id
         search_data = json.load(f)
 
     logger.info("[SCHEDULE] Loading PDF for schedule extraction...")
-    _, pdf_pages = load(source_path)
+    pages_raw, pdf_pages = load(source_path)
 
-    # Reconstruct classified pages from search results — preserves
-    # viewport splits and page overrides from the search agent.
+    # Reconstruct classified pages from search results
     pages = [PageInfo.model_validate(p) for p in search_data["pages"]]
+    sheet_index = [
+        SheetIndexEntry.model_validate(e) for e in search_data["sheet_index"]
+    ]
+
+    # Re-classify to ensure page_type is set (pages from JSON may lack it
+    # if the loader returns fresh PageInfo objects).
+    from medina.pdf.classifier import classify_pages
+    pages_raw = classify_pages(pages_raw, pdf_pages, sheet_index)
 
     schedule_pages = [
-        p for p in pages if p.page_type == PageType.SCHEDULE
+        p for p in pages_raw if p.page_type == PageType.SCHEDULE
     ]
-    # For schedule extraction and combo-page detection, use physical
-    # plan pages (not viewport-split virtual pages).  Schedule tables
-    # span the full page regardless of viewports.
     plan_pages = [
-        p for p in pages
-        if p.page_type == PageType.LIGHTING_PLAN and not p.parent_sheet_code
+        p for p in pages_raw if p.page_type == PageType.LIGHTING_PLAN
     ]
-    # If all plan pages are viewport-split, use the virtual pages
-    # (the physical page still has the same schedule table).
-    if not plan_pages:
-        plan_pages = [
-            p for p in pages if p.page_type == PageType.LIGHTING_PLAN
-        ]
 
     logger.info(
         "[SCHEDULE] Processing %d schedule pages: %s",

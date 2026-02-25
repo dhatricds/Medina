@@ -177,18 +177,6 @@ export function getDashboardExcelUrl(id: string): string {
   return `${BASE}/api/dashboard/${id}/export/excel`;
 }
 
-export interface DashboardToWorkspaceResponse {
-  project_id: string;
-  data: ProjectData;
-  total_pages: number;
-  source_available: boolean;
-  dashboard_id: string;
-}
-
-export function loadDashboardToWorkspace(dashboardId: string): Promise<DashboardToWorkspaceResponse> {
-  return postJson(`/api/dashboard/${dashboardId}/to-workspace`);
-}
-
 // --- Positions ---
 
 export interface PagePositionsResponse {

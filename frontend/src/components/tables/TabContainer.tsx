@@ -3,14 +3,12 @@ import { useProjectStore } from '../../store/projectStore';
 import FixtureTable from './FixtureTable';
 import KeynoteTable from './KeynoteTable';
 import AddFixtureModal from './AddFixtureModal';
-import AddKeynoteModal from './AddKeynoteModal';
 import ChatPanel from './ChatPanel';
 import FixItPanel from './FixItPanel';
 
 export default function TabContainer() {
   const { activeTab, setActiveTab, projectData, editCount, recalcTotals, projectId, appState, error, feedbackCount, addFixtureFeedback, chatOpen, setChatOpen, fixItOpen, setFixItOpen } = useProjectStore();
   const [showAddModal, setShowAddModal] = useState(false);
-  const [showAddKeynoteModal, setShowAddKeynoteModal] = useState(false);
 
   const fixtureCount = projectData?.fixtures.length ?? 0;
   const keynoteCount = projectData?.keynotes.length ?? 0;
@@ -169,29 +167,16 @@ export default function TabContainer() {
       {/* Toolbar */}
       <div className="px-4 py-2.5 bg-card flex items-center justify-between border-b border-border">
         <div className="flex items-center gap-3">
-          {activeTab === 'lighting' ? (
-            <button
-              className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 cursor-pointer transition-all flex items-center gap-1"
-              onClick={() => setShowAddModal(true)}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
-              Add Fixture
-            </button>
-          ) : (
-            <button
-              className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 cursor-pointer transition-all flex items-center gap-1"
-              onClick={() => setShowAddKeynoteModal(true)}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
-              Add Keynote
-            </button>
-          )}
+          <button
+            className="px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 cursor-pointer transition-all flex items-center gap-1"
+            onClick={() => setShowAddModal(true)}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            Add Fixture
+          </button>
           <ChatButton />
           <span className="text-xs text-text-light">Click any count cell to edit</span>
           {editCount > 0 && (
@@ -225,11 +210,6 @@ export default function TabContainer() {
         <AddFixtureModal
           onSubmit={addFixtureFeedback}
           onClose={() => setShowAddModal(false)}
-        />
-      )}
-      {showAddKeynoteModal && (
-        <AddKeynoteModal
-          onClose={() => setShowAddKeynoteModal(false)}
         />
       )}
     </div>
