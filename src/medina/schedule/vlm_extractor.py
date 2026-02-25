@@ -33,14 +33,16 @@ For EACH fixture row, extract these fields:
 - "max_va": Maximum volt-amperes or wattage (e.g., "50 VA", "119W-LED", "48W")
 
 CRITICAL — Read the "code" / "TYPE" column very carefully:
-- Fixture codes are often multi-letter prefixes like "AL1", "AL1E", "WL2", "EX1", \
-"EF3", NOT just "A1". Read EVERY character in the code cell.
-- Common prefixes: AL (area light), WL (wall light), EX (exit), EF (emergency), \
-DL (downlight), FL (flood light), PL (pendant light), SL (strip light).
-- If a code looks like it could be "A1" or "AL1", zoom in and check — it is \
-very likely "AL1" (area light) in industrial/commercial drawings.
+- The code is the SHORT identifier in the TYPE or FIXTURE TYPE column.
+- Codes can be very short (single letter like "A", "B", "C", "D") or longer \
+("AL1", "WL2", "EX1", "EM", "ELM2"). Read EXACTLY what is in the TYPE cell.
+- Do NOT confuse the fixture code with catalog numbers, model numbers, or \
+part numbers in OTHER columns. The code is ONLY from the TYPE column.
+- Common short codes: A, B, C, D, E, F (single letters are valid fixture types).
+- Common longer codes: AL1, WL2, EX1, EM, D1, F1, BB, FF, X2.
 - Codes ending in "E" (like "AL1E", "AL3E") indicate emergency battery versions.
-- Read each code character by character. Do NOT truncate or abbreviate codes.
+- Read each code character by character. Do NOT add extra characters from \
+other columns (like catalog numbers).
 
 IMPORTANT:
 - Extract ALL fixture rows from the table, do not skip any.
@@ -55,15 +57,26 @@ long description.
 Return ONLY a JSON array of objects, no other text. Example:
 [
   {
-    "code": "AL1",
-    "description": "INDUSTRIAL LED LUMINAIRE, YOKE MOUNTED",
-    "fixture_style": "INDUSTRIAL LED LUMINAIRE",
+    "code": "A",
+    "description": "2'x2' FLAT PANEL, RECESSED, LED",
+    "fixture_style": "FLAT PANEL LED",
     "voltage": "120/277",
-    "mounting": "YOKE",
-    "lumens": "LED 18000 LUM",
-    "cct": "5000K",
-    "dimming": "0-10V DIMMING",
-    "max_va": "119W"
+    "mounting": "RECESSED",
+    "lumens": "3500 LUM",
+    "cct": "4000K",
+    "dimming": "",
+    "max_va": "35W"
+  },
+  {
+    "code": "EM",
+    "description": "EMERGENCY EGRESS UNIT WITH BATTERY",
+    "fixture_style": "EMERGENCY BATTERY UNIT",
+    "voltage": "120/277",
+    "mounting": "WALL",
+    "lumens": "",
+    "cct": "",
+    "dimming": "",
+    "max_va": "2W"
   }
 ]
 """

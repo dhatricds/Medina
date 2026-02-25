@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useProjectStore } from '../../store/projectStore';
+import { submitFeedback } from '../../api/client';
 
 interface Props {
   onClose: () => void;
@@ -26,7 +27,7 @@ export default function AddKeynoteModal({ onClose }: Props) {
     const { projectId, addCorrection } = useProjectStore.getState();
     if (!projectId || !projectData) return;
 
-    // Add keynote to local state
+    // Add keynote to local state optimistically
     useProjectStore.setState((s) => {
       if (!s.projectData) return {};
       const existingKn = s.projectData.keynotes.find(
@@ -42,41 +43,55 @@ export default function AddKeynoteModal({ onClose }: Props) {
         });
       } else {
         // Add brand new keynote
+        const zeroCounts: Record<string, number> = {};
+        for (const p of s.projectData.lighting_plans) {
+          zeroCounts[p] = 0;
+        }
+        zeroCounts[plan] = count;
         updatedKeynotes = [
           ...s.projectData.keynotes,
           {
             keynote_number: num,
             keynote_text: keynoteText.trim(),
-            counts_per_plan: { [plan]: count },
+            counts_per_plan: zeroCounts,
             total: count,
             fixture_references: [],
           },
         ];
       }
-      return { projectData: { ...s.projectData, keynotes: updatedKeynotes } };
+      return {
+        projectData: {
+          ...s.projectData,
+          keynotes: updatedKeynotes,
+          summary: {
+            ...s.projectData.summary,
+            total_keynotes: existingKn
+              ? s.projectData.summary.total_keynotes
+              : s.projectData.summary.total_keynotes + 1,
+          },
+        },
+      };
     });
 
     // Track correction
     addCorrection({ type: 'keynote', identifier: num, sheet: plan, original: 0, corrected: count });
 
-    // Submit feedback to backend
-    import('../../api/client').then(({ submitFeedback }) => {
-      submitFeedback(projectId, {
-        action: 'keynote_count_override',
-        fixture_code: `KN-${num}`,
-        reason: 'missing_keynote',
-        reason_detail: `Added keynote #${num} on ${plan} with count ${count}`,
-        fixture_data: {
-          sheet: plan,
-          corrected: count,
-          original: 0,
-          keynote_number: num,
-          keynote_text: keynoteText.trim(),
-        },
-      }).then(() => {
-        useProjectStore.setState((s) => ({ feedbackCount: s.feedbackCount + 1 }));
-      }).catch(() => {});
-    });
+    // Submit feedback to backend (fire-and-forget)
+    submitFeedback(projectId, {
+      action: 'keynote_add',
+      fixture_code: `KN-${num}`,
+      reason: 'missing_fixture',
+      reason_detail: `Added keynote #${num} on ${plan} with count ${count}`,
+      fixture_data: {
+        sheet: plan,
+        corrected: count,
+        original: 0,
+        keynote_number: num,
+        keynote_text: keynoteText.trim(),
+      },
+    }).then(() => {
+      useProjectStore.setState((s) => ({ feedbackCount: s.feedbackCount + 1 }));
+    }).catch(() => {});
 
     onClose();
   };

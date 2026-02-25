@@ -21,7 +21,7 @@ class MedinaConfig(BaseSettings):
     }
 
     anthropic_api_key: str = ""
-    vision_model: str = "claude-opus-4-6"
+    vision_model: str = "claude-sonnet-4-6"
     render_dpi: int = 300
     use_vision_counting: bool = False
     output_format: str = "both"  # "excel", "json", "both"

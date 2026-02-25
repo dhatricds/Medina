@@ -28,6 +28,8 @@ _ACTION_TARGET: dict[str, frozenset[int]] = {
     "update_spec":            frozenset({2, 5}),       # schedule + QA
     "count_override":         frozenset({3, 5}),        # count + QA
     "keynote_count_override": frozenset({4, 5}),        # keynote + QA
+    "keynote_add":            frozenset({4, 5}),        # keynote + QA
+    "keynote_remove":         frozenset({4, 5}),        # keynote + QA
 }
 
 
@@ -88,6 +90,10 @@ class FeedbackHints(BaseModel):
     count_overrides: dict[str, dict[str, int]] = Field(default_factory=dict)
     # Keynote count overrides: {keynote_number: {sheet_code: corrected_count}}
     keynote_count_overrides: dict[str, dict[str, int]] = Field(default_factory=dict)
+    # User-added keynotes: [{keynote_number, keynote_text, counts_per_plan}]
+    extra_keynotes: list[dict[str, Any]] = Field(default_factory=list)
+    # User-removed keynote numbers
+    removed_keynote_numbers: list[str] = Field(default_factory=list)
     spec_patches: dict[str, dict[str, str]] = Field(default_factory=dict)
     # Rejected positions: {fixture_code: {sheet_code: [{x0,top,x1,bottom,cx,cy}]}}
     rejected_positions: dict[str, dict[str, list[dict[str, float]]]] = Field(
@@ -194,6 +200,10 @@ def derive_hints(feedback: ProjectFeedback) -> FeedbackHints:
     added_codes: dict[str, dict] = {}
     removed_codes: set[str] = set()
 
+    # Track keynote add/remove
+    added_keynotes: dict[str, dict] = {}  # keynote_number → data
+    removed_keynote_nums: set[str] = set()
+
     for correction in feedback.corrections:
         code = correction.fixture_code
         if correction.action == "add":
@@ -253,6 +263,31 @@ def derive_hints(feedback: ProjectFeedback) -> FeedbackHints:
                 if kn_num not in hints.keynote_count_overrides:
                     hints.keynote_count_overrides[kn_num] = {}
                 hints.keynote_count_overrides[kn_num][sheet] = int(corrected)
+        elif correction.action == "keynote_add":
+            kn_num = str(correction.fixture_data.get("keynote_number", ""))
+            kn_text = correction.fixture_data.get("keynote_text", "")
+            sheet = correction.fixture_data.get("sheet", "")
+            kn_count = int(correction.fixture_data.get("corrected", 0))
+            if kn_num:
+                if kn_num in added_keynotes:
+                    # Merge counts into existing entry
+                    if sheet:
+                        added_keynotes[kn_num]["counts_per_plan"][sheet] = kn_count
+                else:
+                    added_keynotes[kn_num] = {
+                        "keynote_number": kn_num,
+                        "keynote_text": kn_text,
+                        "counts_per_plan": {sheet: kn_count} if sheet else {},
+                    }
+                removed_keynote_nums.discard(kn_num)
+        elif correction.action == "keynote_remove":
+            kn_num = str(correction.fixture_data.get("keynote_number", ""))
+            if not kn_num:
+                # Extract from fixture_code like "KN-3"
+                kn_num = code.replace("KN-", "") if code.startswith("KN-") else ""
+            if kn_num:
+                removed_keynote_nums.add(kn_num)
+                added_keynotes.pop(kn_num, None)
         elif correction.action == "reclassify_page":
             page_type = correction.fixture_data.get("page_type", "")
             if code and page_type:
@@ -270,5 +305,7 @@ def derive_hints(feedback: ProjectFeedback) -> FeedbackHints:
 
     hints.extra_fixtures = list(added_codes.values())
     hints.removed_codes = sorted(removed_codes)
+    hints.extra_keynotes = list(added_keynotes.values())
+    hints.removed_keynote_numbers = sorted(removed_keynote_nums)
 
     return hints

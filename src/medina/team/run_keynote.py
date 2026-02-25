@@ -187,6 +187,54 @@ def run(source: str, work_dir: str, source_key: str = "", project_id: str = "", 
                             kn_num, plan_code, corrected,
                         )
 
+    # --- Apply keynote add/remove from user feedback ---
+    if hints and hasattr(hints, "removed_keynote_numbers") and hints.removed_keynote_numbers:
+        before = len(all_keynotes)
+        removed_set = set(str(n) for n in hints.removed_keynote_numbers)
+        all_keynotes = [kn for kn in all_keynotes if str(kn.number) not in removed_set]
+        # Also remove from counts dicts
+        for plan_code in list(all_keynote_counts):
+            for kn_num in removed_set:
+                all_keynote_counts[plan_code].pop(kn_num, None)
+        for kn_num in removed_set:
+            all_keynote_positions.pop(kn_num, None)
+        logger.info(
+            "[KEYNOTE] Removed %d user-rejected keynotes: %s",
+            before - len(all_keynotes), sorted(removed_set),
+        )
+
+    if hints and hasattr(hints, "extra_keynotes") and hints.extra_keynotes:
+        from medina.models import KeyNote
+        for kn_data in hints.extra_keynotes:
+            kn_num = str(kn_data.get("keynote_number", ""))
+            kn_text = kn_data.get("keynote_text", "")
+            kn_counts = kn_data.get("counts_per_plan", {})
+            if not kn_num:
+                continue
+            # Check if keynote already exists (update it)
+            existing = next((k for k in all_keynotes if str(k.number) == kn_num), None)
+            if existing:
+                for plan_code, count in kn_counts.items():
+                    existing.counts_per_plan[plan_code] = count
+                existing.total = sum(existing.counts_per_plan.values())
+                if kn_text and not existing.text:
+                    existing.text = kn_text
+                logger.info("[KEYNOTE] Updated user-added keynote #%s", kn_num)
+            else:
+                new_kn = KeyNote(
+                    number=kn_num,
+                    text=kn_text,
+                    counts_per_plan=kn_counts,
+                    total=sum(kn_counts.values()),
+                )
+                all_keynotes.append(new_kn)
+                logger.info("[KEYNOTE] Added user-provided keynote #%s", kn_num)
+            # Update all_keynote_counts
+            for plan_code, count in kn_counts.items():
+                if plan_code not in all_keynote_counts:
+                    all_keynote_counts[plan_code] = {}
+                all_keynote_counts[plan_code][kn_num] = count
+
     logger.info(
         "[KEYNOTE] Extracted %d unique keynotes", len(all_keynotes),
     )

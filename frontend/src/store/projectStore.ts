@@ -15,6 +15,7 @@ import {
   getDashboardProject,
   deleteDashboardProject,
   getDashboardExcelUrl,
+  editDashboardProject,
   getPagePositions,
   submitFeedback,
   getFeedback,
@@ -209,6 +210,7 @@ interface ProjectStore {
   closeDashboardDetail: () => void;
   removeDashboardProject: (id: string) => Promise<void>;
   downloadDashboardExcel: (id: string) => void;
+  editDashboardForWorkspace: (id: string) => Promise<void>;
 
   // Fix It / Chat actions
   setFixItOpen: (open: boolean) => void;
@@ -377,6 +379,46 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   downloadDashboardExcel: (id: string) => {
     window.open(getDashboardExcelUrl(id), '_blank');
+  },
+
+  editDashboardForWorkspace: async (id: string) => {
+    try {
+      // Ask backend to create a workspace ProjectState from dashboard data
+      const { project_id } = await editDashboardProject(id);
+
+      // Load the project data via the standard results endpoint
+      const data = await getResults(project_id);
+      const originalCopy = JSON.parse(JSON.stringify(data)) as ProjectData;
+
+      set({
+        view: 'workspace',
+        appState: 'complete',
+        projectData: data,
+        originalProjectData: originalCopy,
+        projectId: project_id,
+        totalPages: getPageCount(data),
+        currentPage: 1,
+        agents: buildDemoAgents(data),
+        corrections: [],
+        editCount: 0,
+        error: null,
+        sseActive: false,
+        highlight: { ...emptyHighlight },
+        savedRejections: {},
+        savedAdditions: {},
+        feedbackItems: [],
+        feedbackCount: 0,
+        preReprocessData: null,
+        reprocessDiffs: {},
+        dashboardDetail: null,
+        dashboardDetailId: null,
+      });
+
+      // Load any existing feedback
+      get().loadFeedback(project_id);
+    } catch (e) {
+      console.error('Failed to open dashboard project for editing:', e);
+    }
   },
 
   // Fix It / Chat actions

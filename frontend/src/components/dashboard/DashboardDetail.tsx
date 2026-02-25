@@ -1,7 +1,7 @@
 import { useProjectStore } from '../../store/projectStore';
 
 export default function DashboardDetail() {
-  const { dashboardDetail, dashboardDetailId, closeDashboardDetail, downloadDashboardExcel } = useProjectStore();
+  const { dashboardDetail, dashboardDetailId, closeDashboardDetail, downloadDashboardExcel, editDashboardForWorkspace } = useProjectStore();
 
   if (!dashboardDetail || !dashboardDetailId) return null;
 
@@ -38,17 +38,30 @@ export default function DashboardDetail() {
             </div>
           </div>
         </div>
-        <button
-          className="px-4 py-2 rounded-md text-[13px] font-semibold flex items-center gap-1.5 bg-success text-white hover:bg-green-600 transition-all cursor-pointer"
-          onClick={() => downloadDashboardExcel(dashboardDetailId)}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-            <polyline points="7 10 12 15 17 10" />
-            <line x1="12" y1="15" x2="12" y2="3" />
-          </svg>
-          Download Excel
-        </button>
+        <div className="flex items-center gap-2.5">
+          <button
+            className="px-4 py-2 rounded-md text-[13px] font-semibold flex items-center gap-1.5 bg-accent text-white hover:bg-accent-hover transition-all cursor-pointer"
+            onClick={() => editDashboardForWorkspace(dashboardDetailId)}
+            title="Open in workspace with PDF viewer and full editing"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+            </svg>
+            Edit
+          </button>
+          <button
+            className="px-4 py-2 rounded-md text-[13px] font-semibold flex items-center gap-1.5 bg-success text-white hover:bg-green-600 transition-all cursor-pointer"
+            onClick={() => downloadDashboardExcel(dashboardDetailId)}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            Download Excel
+          </button>
+        </div>
       </div>
 
       {/* Content */}

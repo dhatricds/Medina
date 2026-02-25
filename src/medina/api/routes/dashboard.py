@@ -383,6 +383,15 @@ async def approve_project(project_id: str, request: Request, body: ApproveReques
     qa = save_data.get("qa_report")
     now = datetime.now(timezone.utc).isoformat()
 
+    # Copy positions file to dashboard if available
+    if project.output_path:
+        src_positions = Path(f"{project.output_path}_positions.json")
+        if src_positions.exists():
+            import shutil
+            dst_positions = DASHBOARD_DIR / f"{dashboard_id}_positions.json"
+            shutil.copy2(src_positions, dst_positions)
+            logger.info("Copied positions file to dashboard: %s", dst_positions)
+
     entry = {
         "id": dashboard_id,
         "name": project_name,
@@ -394,6 +403,8 @@ async def approve_project(project_id: str, request: Request, body: ApproveReques
         "plan_count": summary.get("total_lighting_plans", 0),
         "qa_score": qa.get("overall_confidence") if qa else None,
         "qa_passed": qa.get("passed") if qa else None,
+        "source_path": str(project.source_path),
+        "output_path": str(project.output_path) if project.output_path else None,
     }
     index.append(entry)
     _write_index(index)
@@ -423,4 +434,90 @@ async def delete_dashboard_project(dashboard_id: str, request: Request):
         if file_path.exists():
             file_path.unlink()
 
+    # Also remove positions file
+    pos_path = DASHBOARD_DIR / f"{dashboard_id}_positions.json"
+    if pos_path.exists():
+        pos_path.unlink()
+
     return {"deleted": dashboard_id}
+
+
+@router.post("/{dashboard_id}/edit")
+async def edit_dashboard_project(dashboard_id: str, request: Request):
+    """Open an approved dashboard project for editing in the workspace.
+
+    Creates an in-memory ProjectState so that page rendering, position
+    lookup, feedback and reprocess APIs all work normally.  Returns
+    a project_id the frontend can use with the standard workspace APIs.
+    """
+    tenant_id = getattr(request.state, "tenant_id", "default")
+    index = _read_index()
+    entry = next((e for e in index if e["id"] == dashboard_id), None)
+    if not entry or entry.get("tenant_id", "default") != tenant_id:
+        raise HTTPException(status_code=404, detail="Dashboard project not found")
+
+    # Load the full project JSON
+    project_json_path = DASHBOARD_DIR / f"{dashboard_id}.json"
+    if not project_json_path.exists():
+        raise HTTPException(status_code=404, detail="Dashboard project data not found")
+    with open(project_json_path) as f:
+        project_data = json.load(f)
+
+    # Resolve source PDF path — try index entry, then JSON fields
+    source_path_str = (
+        entry.get("source_path")
+        or project_data.get("source_path")
+        or project_data.get("source", "")
+    )
+    if not source_path_str:
+        raise HTTPException(status_code=400, detail="Source PDF path not available for this project")
+
+    source_path = Path(source_path_str)
+    if not source_path.is_absolute():
+        # Relative to project root
+        project_root = Path(__file__).resolve().parents[4]
+        source_path = project_root / source_path
+    if not source_path.exists():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Source PDF not found: {source_path.name}. The original file may have been moved.",
+        )
+
+    # Determine output_path: prefer dashboard positions file, fall back to original
+    dashboard_positions = DASHBOARD_DIR / f"{dashboard_id}_positions.json"
+    original_output = (
+        entry.get("output_path")
+        or project_data.get("output_path", "")
+    )
+
+    # Use dashboard directory as output base (positions file is here)
+    output_base = str(DASHBOARD_DIR / dashboard_id)
+    if not dashboard_positions.exists() and original_output:
+        # Fall back to original output path if dashboard positions don't exist
+        output_base = original_output
+
+    # Create an in-memory project state
+    from medina.api.projects import ProjectState, _projects
+    import uuid
+
+    project_id = uuid.uuid4().hex[:12]
+    project = ProjectState(
+        project_id=project_id,
+        source_path=source_path,
+        tenant_id=tenant_id,
+        status="completed",
+        result_data=project_data,
+        output_path=output_base,
+    )
+    _projects[project_id] = project
+
+    logger.info(
+        "Opened dashboard project %s for editing as workspace project %s",
+        dashboard_id, project_id,
+    )
+
+    return {
+        "project_id": project_id,
+        "dashboard_id": dashboard_id,
+        "source": str(source_path),
+    }

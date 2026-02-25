@@ -177,6 +177,10 @@ export function getDashboardExcelUrl(id: string): string {
   return `${BASE}/api/dashboard/${id}/export/excel`;
 }
 
+export function editDashboardProject(id: string): Promise<{ project_id: string; dashboard_id: string; source: string }> {
+  return postJson(`/api/dashboard/${id}/edit`);
+}
+
 // --- Positions ---
 
 export interface PagePositionsResponse {
