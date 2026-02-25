@@ -423,58 +423,59 @@ def _count_keynote_occurrences(
         return (counts, positions) if return_positions else counts
 
     # ── Shape-quality-aware modal font_h detection ──────────────────
-    # On dense pages (>10k lines), the quadrant check alone is unreliable
-    # because wall/equipment lines create false enclosures around bare
-    # numbers.  Use polygon closure analysis to find real geometric shapes
-    # (hexagons, diamonds) and derive the correct modal font_h from those.
+    # The quadrant check alone is unreliable — wall/equipment/conduit lines
+    # create false enclosures around bare numbers (circuit numbers, room
+    # labels, etc.).  Always run polygon closure analysis to find real
+    # geometric shapes (hexagons, diamonds) and derive the correct modal
+    # font_h from those.
 
-    is_dense = len(lines) > 10_000
     modal_font_h: float | None = None
 
-    if is_dense:
-        # Pre-filter to "shape-length" segments (3–20 pt) for efficiency.
-        shape_lines: list[Any] = []
-        for ln in lines:
-            seg_len = math.sqrt(
-                (ln["x1"] - ln["x0"]) ** 2
-                + (ln["bottom"] - ln["top"]) ** 2
-            )
-            if 3.0 <= seg_len <= 20.0:
-                shape_lines.append(ln)
+    # Pre-filter to "shape-length" segments (3–20 pt) for efficiency.
+    shape_lines: list[Any] = []
+    for ln in lines:
+        seg_len = math.sqrt(
+            (ln["x1"] - ln["x0"]) ** 2
+            + (ln["bottom"] - ln["top"]) ** 2
+        )
+        if 3.0 <= seg_len <= 20.0:
+            shape_lines.append(ln)
 
+    logger.debug(
+        "Shape quality check: %d total lines, %d shape-length lines, "
+        "%d candidates with quad>=3",
+        len(lines), len(shape_lines),
+        sum(1 for c in candidates if c["quadrants"] >= 3),
+    )
+
+    # Compute shape quality for candidates passing quadrant check.
+    shape_verified: list[dict] = []
+    for c in candidates:
+        if c["quadrants"] < 3:
+            continue
+        segs, x2, std = _check_shape_quality(
+            c["cx"], c["cy"], shape_lines,
+        )
+        c["shape_segs"] = segs
+        c["pts_x2"] = x2
+        c["std_mid"] = std
+        # Real polygon: 4–12 edges, >=2 shared vertices, tight ring.
+        # std < 2.0 separates real hexagons/diamonds (std ~0.7–1.5)
+        # from false positives near structured wiring (std ~2.0–3.0).
+        if 4 <= segs <= 12 and x2 >= 2 and std < 2.0:
+            shape_verified.append(c)
+
+    if len(shape_verified) >= 2:
+        font_counts = Counter(c["font_h"] for c in shape_verified)
+        modal_font_h = font_counts.most_common(1)[0][0]
         logger.debug(
-            "Dense page: %d total lines, %d shape-length lines, "
-            "%d candidates with quad>=3",
-            len(lines), len(shape_lines),
-            sum(1 for c in candidates if c["quadrants"] >= 3),
+            "Shape-verified modal font_h=%.1f from %d verified candidates",
+            modal_font_h, len(shape_verified),
         )
 
-        # Compute shape quality for candidates passing quadrant check.
-        shape_verified: list[dict] = []
-        for c in candidates:
-            if c["quadrants"] < 3:
-                continue
-            segs, x2, std = _check_shape_quality(
-                c["cx"], c["cy"], shape_lines,
-            )
-            c["shape_segs"] = segs
-            c["pts_x2"] = x2
-            c["std_mid"] = std
-            # Real polygon: 4–12 edges, >=2 shared vertices, tight ring.
-            # std < 2.0 separates real hexagons/diamonds (std ~0.7–1.5)
-            # from false positives near structured wiring (std ~2.0–3.0).
-            if 4 <= segs <= 12 and x2 >= 2 and std < 2.0:
-                shape_verified.append(c)
-
-        if len(shape_verified) >= 2:
-            font_counts = Counter(c["font_h"] for c in shape_verified)
-            modal_font_h = font_counts.most_common(1)[0][0]
-            logger.debug(
-                "Shape-verified modal font_h=%.1f from %d verified candidates",
-                modal_font_h, len(shape_verified),
-            )
-
-    # Fallback: standard quadrant-based modal font_h (works on clean pages).
+    # Fallback: standard quadrant-based modal font_h (works on clean pages
+    # where shape quality check finds no verified candidates — e.g. pages
+    # with very few lines where shapes are simple strokes).
     if modal_font_h is None:
         high_conf = [c for c in candidates if c["quadrants"] >= 4]
         if high_conf:

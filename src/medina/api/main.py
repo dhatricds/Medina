@@ -49,6 +49,8 @@ app = FastAPI(
 _PUBLIC_API_PATHS = {
     "/api/auth/login",
     "/api/auth/register",
+    "/api/auth/forgot-password",
+    "/api/auth/reset-password",
 }
 _PUBLIC_API_PREFIXES = (
     "/api/demo/",

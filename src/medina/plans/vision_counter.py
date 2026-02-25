@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import io
 import json
 import logging
@@ -13,9 +12,60 @@ from PIL import Image
 
 from medina.config import MedinaConfig, get_config
 from medina.exceptions import VisionAPIError
+
 from medina.models import PageInfo
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_json_block(text: str) -> str | None:
+    """Extract JSON object string from VLM response text.
+
+    Tries multiple strategies:
+    1. Content between ```json and ``` fences (string-based, not regex)
+    2. Content between ``` and ``` fences
+    3. Brace-matched extraction from raw text
+    """
+    # Strategy 1: ```json ... ``` fences
+    if "```json" in text:
+        try:
+            start = text.index("```json") + 7
+            end = text.index("```", start)
+            candidate = text[start:end].strip()
+            if candidate.startswith("{"):
+                return candidate
+        except ValueError:
+            pass
+
+    # Strategy 2: ``` ... ``` fences (without json tag)
+    if "```" in text:
+        try:
+            start = text.index("```") + 3
+            # Skip optional language tag on same line
+            nl = text.find("\n", start)
+            if nl != -1 and nl - start < 10:
+                start = nl + 1
+            end = text.index("```", start)
+            candidate = text[start:end].strip()
+            if candidate.startswith("{"):
+                return candidate
+        except ValueError:
+            pass
+
+    # Strategy 3: Find outermost { ... } using brace counting
+    brace_start = text.find("{")
+    if brace_start == -1:
+        return None
+    depth = 0
+    for i in range(brace_start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace_start : i + 1]
+
+    return None
 
 
 def _crop_to_viewport(
@@ -81,23 +131,13 @@ def _parse_vision_response(
     Handles cases where the model wraps JSON in markdown code fences
     or includes extra commentary.
     """
-    # Try to extract JSON from code fences first.
-    fence_match = re.search(
-        r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL
-    )
-    if fence_match:
-        json_str = fence_match.group(1)
-    else:
-        # Try to find a bare JSON object.
-        brace_match = re.search(r'\{[^{}]*\}', response_text, re.DOTALL)
-        if brace_match:
-            json_str = brace_match.group(0)
-        else:
-            logger.warning(
-                "Could not find JSON in vision response: %s",
-                response_text[:200],
-            )
-            return {code: 0 for code in fixture_codes}
+    json_str = _extract_json_block(response_text)
+    if json_str is None:
+        logger.warning(
+            "Could not find JSON in vision response: %s",
+            response_text[:200],
+        )
+        return {code: 0 for code in fixture_codes}
 
     try:
         data = json.loads(json_str)
@@ -156,18 +196,7 @@ def count_fixtures_vision(
         logger.warning("No fixture codes provided for vision counting")
         return {}
 
-    if not config.anthropic_api_key:
-        raise VisionAPIError(
-            "Anthropic API key not configured. "
-            "Set MEDINA_ANTHROPIC_API_KEY in environment or .env file."
-        )
-
-    try:
-        from anthropic import Anthropic
-    except ImportError as exc:
-        raise VisionAPIError(
-            "anthropic package not installed. Run: pip install anthropic"
-        ) from exc
+    from medina.vlm_client import get_vlm_client
 
     prompt = _build_prompt(fixture_codes, sheet)
 
@@ -197,43 +226,8 @@ def count_fixtures_vision(
         except Exception as e:
             logger.warning("Viewport crop failed for %s: %s", sheet, e)
 
-    encoded_image = base64.b64encode(img_to_send).decode()
-
-    try:
-        client = Anthropic(api_key=config.anthropic_api_key)
-        message = client.messages.create(
-            model=config.vision_model,
-            max_tokens=2000,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": encoded_image,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        },
-                    ],
-                }
-            ],
-        )
-    except Exception as exc:
-        raise VisionAPIError(
-            f"Vision API call failed for plan {sheet}: {exc}"
-        ) from exc
-
-    # Extract text content from the response.
-    response_text = ""
-    for block in message.content:
-        if hasattr(block, "text"):
-            response_text += block.text
+    client = get_vlm_client(config)
+    response_text = client.vision_query([img_to_send], prompt, max_tokens=2000)
 
     if not response_text:
         logger.warning("Empty response from vision API for plan %s", sheet)
@@ -243,6 +237,34 @@ def count_fixtures_vision(
     counts = _parse_vision_response(response_text, fixture_codes)
 
     total = sum(counts.values())
+
+    # If primary VLM returned no usable JSON, try fallback provider
+    if total == 0 and _extract_json_block(response_text) is None:
+        from medina.vlm_client import get_fallback_vlm_client
+
+        fallback = get_fallback_vlm_client(config)
+        if fallback:
+            logger.info(
+                "Vision primary returned no JSON for %s — trying %s fallback",
+                sheet, fallback.provider,
+            )
+            try:
+                fb_text = fallback.vision_query(
+                    [img_to_send], prompt, max_tokens=2000,
+                )
+                if fb_text:
+                    fb_counts = _parse_vision_response(fb_text, fixture_codes)
+                    fb_total = sum(fb_counts.values())
+                    if fb_total > 0 or _extract_json_block(fb_text) is not None:
+                        counts = fb_counts
+                        total = fb_total
+                        logger.info(
+                            "Vision fallback (%s) for %s: %d total",
+                            fallback.provider, sheet, fb_total,
+                        )
+            except Exception as e:
+                logger.warning("Vision fallback failed for %s: %s", sheet, e)
+
     logger.info(
         "Vision plan %s: found %d total fixtures across %d types",
         sheet, total, sum(1 for c in counts.values() if c > 0),

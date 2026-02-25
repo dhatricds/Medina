@@ -21,7 +21,11 @@ class MedinaConfig(BaseSettings):
     }
 
     anthropic_api_key: str = ""
-    vision_model: str = "claude-opus-4-6"
+    vision_model: str = "claude-sonnet-4-6"
+    gemini_vision_model: str = "gemini-2.5-flash"
+    vlm_provider: str = "anthropic"  # "anthropic" (primary) or "gemini"
+    vlm_fallback_provider: str = "gemini"  # fallback when primary fails
+    gemini_api_key: str = ""
     render_dpi: int = 300
     use_vision_counting: bool = False
     output_format: str = "both"  # "excel", "json", "both"

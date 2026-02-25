@@ -161,16 +161,23 @@ def detect_viewports(
     width = pdf_page.width
     height = pdf_page.height
 
+    # Use actual page bbox for coordinate space (handles non-zero origins).
+    bx0, by0, bx1, by1 = pdf_page.bbox
+
     # Viewport titles typically appear in the bottom 15% of the page,
     # above the title block (which is in the rightmost ~25%).
     # Exclude the rightmost 25% (title block area) to avoid false positives
     # from the page title that repeats "LIGHTING PLAN" in the title block.
-    title_block_x = width * 0.75
-    title_region_bbox = (0, height * 0.82, title_block_x, height * 0.97)
+    title_block_x = bx0 + width * 0.75
+    title_region_bbox = (bx0, by0 + height * 0.82, title_block_x, by0 + height * 0.97)
     try:
         cropped = pdf_page.within_bbox(title_region_bbox)
         words = cropped.extract_words(x_tolerance=3, y_tolerance=3)
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "Viewport detection failed on %s: %s",
+            page_info.sheet_code or f"page {page_info.page_number}", e,
+        )
         return []
 
     if not words:
@@ -252,7 +259,7 @@ def detect_viewports(
     # non-lighting title to its right (if any) instead of the full page
     # width.  This prevents power/systems viewports from being included.
     rightmost_lighting_center = lighting_titles[-1]["x_center"]
-    right_boundary = width
+    right_boundary = bx1  # Use actual page right edge (not width)
     for nlt in non_lighting_titles:
         if nlt["x_center"] > rightmost_lighting_center:
             right_boundary = (rightmost_lighting_center + nlt["x_center"]) / 2
@@ -261,7 +268,7 @@ def detect_viewports(
     viewports: list[Viewport] = []
     for i, title in enumerate(lighting_titles):
         if i == 0:
-            x0 = 0.0
+            x0 = bx0  # Use actual page left edge
         else:
             x0 = (lighting_titles[i - 1]["x_center"] + title["x_center"]) / 2
 
@@ -274,7 +281,7 @@ def detect_viewports(
         viewports.append(Viewport(
             label=label,
             title=title["text"],
-            bbox=(x0, 0, x1, height),
+            bbox=(x0, by0, x1, by1),  # Use actual page y-range
             page_type=PageType.LIGHTING_PLAN,
         ))
 

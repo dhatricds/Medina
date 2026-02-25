@@ -194,3 +194,52 @@ async def get_current_user(request: Request) -> User:
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+# ---------------------------------------------------------------------------
+# Password reset
+# ---------------------------------------------------------------------------
+def create_reset_token(email: str) -> str | None:
+    """Create a password reset token for the user with this email.
+
+    Returns the token string, or None if no user found.
+    """
+    result = _load_user_by_email(email)
+    if result is None:
+        return None
+    user, _ = result
+    token = secrets.token_urlsafe(32)
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES (?, ?, ?)",
+        (user.id, token, expires_at),
+    )
+    conn.commit()
+    return token
+
+
+def reset_password(token: str, new_password: str) -> bool:
+    """Validate a reset token and update the user's password.
+
+    Returns True on success, False if token is invalid/expired/used.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id, user_id, expires_at, used FROM password_reset_tokens WHERE token = ?",
+        (token,),
+    ).fetchone()
+    if not row:
+        return False
+    if row["used"]:
+        return False
+    expires_at = datetime.fromisoformat(row["expires_at"]).replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) > expires_at:
+        return False
+
+    hashed = hash_password(new_password)
+    conn.execute("UPDATE users SET hashed_password = ? WHERE id = ?", (hashed, row["user_id"]))
+    conn.execute("UPDATE password_reset_tokens SET used = 1 WHERE id = ?", (row["id"],))
+    conn.commit()
+    logger.info("Password reset for user %s", row["user_id"])
+    return True

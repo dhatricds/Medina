@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import re
 from typing import Any
 
 from medina.config import MedinaConfig, get_config
-from medina.exceptions import ScheduleExtractionError, VisionAPIError
+from medina.exceptions import ScheduleExtractionError
 from medina.models import FixtureRecord, PageInfo
 
 logger = logging.getLogger(__name__)
@@ -69,25 +68,57 @@ Return ONLY a JSON array of objects, no other text. Example:
 """
 
 
+def _extract_json_array(text: str) -> str | None:
+    """Extract JSON array string from VLM response using robust parsing."""
+    # Strategy 1: ```json ... ``` fences
+    if "```json" in text:
+        try:
+            start = text.index("```json") + 7
+            end = text.index("```", start)
+            candidate = text[start:end].strip()
+            if candidate.startswith("["):
+                return candidate
+        except ValueError:
+            pass
+
+    # Strategy 2: ``` ... ``` fences
+    if "```" in text:
+        try:
+            start = text.index("```") + 3
+            nl = text.find("\n", start)
+            if nl != -1 and nl - start < 10:
+                start = nl + 1
+            end = text.index("```", start)
+            candidate = text[start:end].strip()
+            if candidate.startswith("["):
+                return candidate
+        except ValueError:
+            pass
+
+    # Strategy 3: Bracket-matched extraction
+    bracket_start = text.find("[")
+    if bracket_start == -1:
+        return None
+    depth = 0
+    for i in range(bracket_start, len(text)):
+        if text[i] == "[":
+            depth += 1
+        elif text[i] == "]":
+            depth -= 1
+            if depth == 0:
+                return text[bracket_start : i + 1]
+    return None
+
+
 def _parse_vlm_response(response_text: str) -> list[dict[str, str]]:
     """Parse the JSON fixture list from the VLM response."""
-    # Try to extract JSON from code fences first.
-    fence_match = re.search(
-        r"```(?:json)?\s*(\[.*?\])\s*```", response_text, re.DOTALL
-    )
-    if fence_match:
-        json_str = fence_match.group(1)
-    else:
-        # Try to find a bare JSON array.
-        bracket_match = re.search(r"\[[\s\S]*\]", response_text)
-        if bracket_match:
-            json_str = bracket_match.group(0)
-        else:
-            logger.warning(
-                "Could not find JSON array in VLM schedule response: %s",
-                response_text[:300],
-            )
-            return []
+    json_str = _extract_json_array(response_text)
+    if json_str is None:
+        logger.warning(
+            "Could not find JSON array in VLM schedule response: %s",
+            response_text[:300],
+        )
+        return []
 
     try:
         data = json.loads(json_str)
@@ -180,20 +211,7 @@ def extract_schedule_vlm(
     sheet = page_info.sheet_code or f"page_{page_info.page_number}"
     logger.info("VLM schedule extraction on %s", sheet)
 
-    if not config.anthropic_api_key:
-        raise VisionAPIError(
-            "Anthropic API key not configured for VLM schedule extraction. "
-            "Set MEDINA_ANTHROPIC_API_KEY in environment or .env file."
-        )
-
-    try:
-        from anthropic import Anthropic
-    except ImportError as exc:
-        raise VisionAPIError(
-            "anthropic package not installed. Run: pip install anthropic"
-        ) from exc
-
-    encoded_image = base64.b64encode(image_bytes).decode()
+    from medina.vlm_client import get_vlm_client
 
     # Build the prompt, optionally including plan codes as hints
     prompt = _SCHEDULE_EXTRACTION_PROMPT
@@ -207,40 +225,8 @@ def extract_schedule_vlm(
             f"TYPE column."
         )
 
-    try:
-        client = Anthropic(api_key=config.anthropic_api_key)
-        message = client.messages.create(
-            model=config.vision_model,
-            max_tokens=8000,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": encoded_image,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        },
-                    ],
-                }
-            ],
-        )
-    except Exception as exc:
-        raise VisionAPIError(
-            f"VLM schedule extraction API call failed for {sheet}: {exc}"
-        ) from exc
-
-    response_text = ""
-    for block in message.content:
-        if hasattr(block, "text"):
-            response_text += block.text
+    client = get_vlm_client(config)
+    response_text = client.vision_query([image_bytes], prompt, max_tokens=8000)
 
     if not response_text:
         logger.warning(
