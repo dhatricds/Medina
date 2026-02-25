@@ -15,12 +15,16 @@ interface AuthState {
   isAuthenticated: boolean;
   isLoading: boolean;
   error: string | null;
+  resetMessage: string | null;
+  resetSuccess: boolean;
 
   login: (email: string, password: string) => Promise<boolean>;
   register: (data: { email: string; password: string; name: string; company_name: string }) => Promise<boolean>;
   logout: () => Promise<void>;
   checkAuth: () => Promise<void>;
   clearError: () => void;
+  forgotPassword: (email: string) => Promise<boolean>;
+  resetPassword: (token: string, newPassword: string) => Promise<boolean>;
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -28,6 +32,8 @@ export const useAuthStore = create<AuthState>((set) => ({
   isAuthenticated: false,
   isLoading: true, // start true so ProtectedRoute waits for checkAuth
   error: null,
+  resetMessage: null,
+  resetSuccess: false,
 
   login: async (email, password) => {
     set({ error: null });
@@ -102,5 +108,44 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 
-  clearError: () => set({ error: null }),
+  clearError: () => set({ error: null, resetMessage: null, resetSuccess: false }),
+
+  forgotPassword: async (email) => {
+    set({ error: null, resetMessage: null, resetSuccess: false });
+    try {
+      const res = await fetch(`${BASE}/api/auth/forgot-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const body = await res.json();
+      set({ resetMessage: body.message, resetSuccess: true });
+      return true;
+    } catch {
+      set({ error: 'Network error' });
+      return false;
+    }
+  },
+
+  resetPassword: async (token, newPassword) => {
+    set({ error: null, resetMessage: null, resetSuccess: false });
+    try {
+      const res = await fetch(`${BASE}/api/auth/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, new_password: newPassword }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ detail: 'Reset failed' }));
+        set({ error: body.detail ?? 'Reset failed' });
+        return false;
+      }
+      const body = await res.json();
+      set({ resetMessage: body.message, resetSuccess: true });
+      return true;
+    } catch {
+      set({ error: 'Network error' });
+      return false;
+    }
+  },
 }));

@@ -15,6 +15,7 @@ import {
   getDashboardProject,
   deleteDashboardProject,
   getDashboardExcelUrl,
+  loadDashboardToWorkspace as apiLoadDashboardToWorkspace,
   getPagePositions,
   submitFeedback,
   getFeedback,
@@ -209,6 +210,7 @@ interface ProjectStore {
   closeDashboardDetail: () => void;
   removeDashboardProject: (id: string) => Promise<void>;
   downloadDashboardExcel: (id: string) => void;
+  loadDashboardToWorkspace: (dashboardId: string) => Promise<void>;
 
   // Fix It / Chat actions
   setFixItOpen: (open: boolean) => void;
@@ -251,6 +253,7 @@ interface ProjectStore {
   // Feedback actions
   addFixtureFeedback: (item: FixtureFeedback) => Promise<void>;
   removeFixtureFeedback: (code: string, reason: string, detail: string) => Promise<void>;
+  removeKeynoteFeedback: (keynoteNumber: string, plan: string) => Promise<void>;
   reprocessWithFeedback: () => Promise<void>;
   loadFeedback: (projectId: string) => Promise<void>;
 
@@ -377,6 +380,43 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   downloadDashboardExcel: (id: string) => {
     window.open(getDashboardExcelUrl(id), '_blank');
+  },
+
+  loadDashboardToWorkspace: async (dashboardId: string) => {
+    try {
+      const resp = await apiLoadDashboardToWorkspace(dashboardId);
+      const data = resp.data;
+      const originalCopy = JSON.parse(JSON.stringify(data)) as ProjectData;
+
+      set({
+        view: 'workspace',
+        appState: 'complete',
+        projectData: data,
+        originalProjectData: originalCopy,
+        projectId: resp.project_id,
+        totalPages: resp.source_available ? resp.total_pages : 0,
+        currentPage: 1,
+        agents: buildDemoAgents(data),
+        corrections: [],
+        editCount: 0,
+        error: null,
+        sseActive: false,
+        highlight: { ...emptyHighlight },
+        savedRejections: {},
+        savedAdditions: {},
+        feedbackItems: [],
+        feedbackCount: 0,
+        preReprocessData: null,
+        reprocessDiffs: {},
+        dashboardDetail: null,
+        dashboardDetailId: null,
+      });
+
+      // Load any existing feedback for this project
+      get().loadFeedback(resp.project_id);
+    } catch (e) {
+      console.error('Failed to load dashboard project to workspace:', e);
+    }
   },
 
   // Fix It / Chat actions
@@ -1117,6 +1157,41 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       reason_detail: detail,
     };
     await get().addFixtureFeedback(item);
+  },
+
+  removeKeynoteFeedback: async (keynoteNumber: string, plan: string) => {
+    const { projectId, projectData } = get();
+    if (!projectId || !projectData) return;
+
+    // Set count to 0 for this keynote on this plan
+    const kn = projectData.keynotes.find(k => String(k.keynote_number) === keynoteNumber);
+    const original = kn?.counts_per_plan[plan] ?? 0;
+
+    // Update local state — set count to 0
+    set((s) => {
+      if (!s.projectData) return {};
+      const updatedKeynotes = s.projectData.keynotes.map((k) => {
+        if (String(k.keynote_number) !== keynoteNumber) return k;
+        const newCounts = { ...k.counts_per_plan, [plan]: 0 };
+        const newTotal = Object.values(newCounts).reduce((sum, v) => sum + v, 0);
+        return { ...k, counts_per_plan: newCounts, total: newTotal };
+      });
+      return { projectData: { ...s.projectData, keynotes: updatedKeynotes } };
+    });
+
+    // Submit feedback to backend
+    try {
+      await submitFeedback(projectId, {
+        action: 'keynote_count_override',
+        fixture_code: `KN-${keynoteNumber}`,
+        reason: 'extra_keynote',
+        reason_detail: `Deleted keynote #${keynoteNumber} on ${plan}: ${original} -> 0 (false detection)`,
+        fixture_data: { sheet: plan, corrected: 0, original, keynote_number: keynoteNumber },
+      });
+      set((s) => ({ feedbackCount: s.feedbackCount + 1 }));
+    } catch (e) {
+      console.error('Failed to submit keynote deletion feedback:', e);
+    }
   },
 
   reprocessWithFeedback: async () => {

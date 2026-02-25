@@ -8,7 +8,6 @@ to classify them.
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import re
@@ -78,7 +77,12 @@ def classify_pages_vlm(
     if config is None:
         config = get_config()
 
-    if not config.anthropic_api_key:
+    has_key = (
+        config.anthropic_api_key
+        if config.vlm_provider != "gemini"
+        else config.gemini_api_key
+    )
+    if not has_key:
         logger.warning("No API key available for VLM classification")
         return {}
 
@@ -127,7 +131,7 @@ def _classify_batch(
     config: MedinaConfig,
 ) -> dict[int, list[PageType]]:
     """Classify a batch of pages via a single API call."""
-    import anthropic
+    from medina.vlm_client import get_vlm_client
 
     # Build page number to label mapping
     page_labels: dict[int, str] = {}
@@ -137,55 +141,29 @@ def _classify_batch(
                 pinfo.sheet_code or str(pinfo.page_number)
             )
 
-    # Build message content with images
-    content: list[dict[str, Any]] = []
-
-    # Add prompt text
+    # Build interleaved prompt: text label + image for each page
     page_list = ", ".join(
         f"Page {n} ({page_labels.get(n, str(n))})"
         for n in sorted(page_images.keys())
     )
-    content.append({
-        "type": "text",
-        "text": (
-            f"{_CLASSIFICATION_PROMPT}\n\n"
-            f"Pages to classify: {page_list}\n\n"
-            f"The following images are the pages, in order:"
-        ),
-    })
-
-    # Add each page image
+    prompt_header = (
+        f"{_CLASSIFICATION_PROMPT}\n\n"
+        f"Pages to classify: {page_list}\n\n"
+        f"The following images are the pages, in order:\n"
+    )
     for page_num in sorted(page_images.keys()):
-        img_bytes = page_images[page_num]
-        b64_data = base64.b64encode(img_bytes).decode("utf-8")
-
-        content.append({
-            "type": "text",
-            "text": f"Page {page_num} ({page_labels.get(page_num, str(page_num))}):",
-        })
-        content.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/png",
-                "data": b64_data,
-            },
-        })
-
-    try:
-        client = anthropic.Anthropic(api_key=config.anthropic_api_key)
-        response = client.messages.create(
-            model=config.vision_model,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": content}],
+        prompt_header += (
+            f"\nPage {page_num} "
+            f"({page_labels.get(page_num, str(page_num))}): "
+            f"[see image {page_num}]\n"
         )
-    except Exception as exc:
-        raise VisionAPIError(
-            f"VLM classification API call failed: {exc}"
-        ) from exc
 
-    # Parse response
-    response_text = response.content[0].text.strip()
+    # Collect images in order
+    images = [page_images[n] for n in sorted(page_images.keys())]
+
+    client = get_vlm_client(config)
+    response_text = client.vision_query(images, prompt_header, max_tokens=1024)
+
     return _parse_classification_response(response_text, page_images.keys())
 
 

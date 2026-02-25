@@ -121,6 +121,17 @@ TABLES: list[str] = [
         created_at           TEXT NOT NULL DEFAULT (datetime('now'))
     )""",
 
+    # ── Password reset tokens ────────────────────────────────────────
+    """\
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id    TEXT NOT NULL REFERENCES users(id),
+        token      TEXT UNIQUE NOT NULL,
+        expires_at TEXT NOT NULL,
+        used       INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""",
+
     # ── Runtime parameter overrides ───────────────────────────────────
     """\
     CREATE TABLE IF NOT EXISTS runtime_params (
@@ -146,4 +157,5 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_cove_project ON cove_results(project_id)",
     "CREATE INDEX IF NOT EXISTS idx_plans_project ON agent_plans(project_id)",
     "CREATE INDEX IF NOT EXISTS idx_params_scope ON runtime_params(scope, scope_key)",
+    "CREATE INDEX IF NOT EXISTS idx_reset_tokens_token ON password_reset_tokens(token)",
 ]
