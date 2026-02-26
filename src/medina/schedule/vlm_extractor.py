@@ -163,6 +163,85 @@ def _dict_to_fixture(raw: dict[str, Any]) -> FixtureRecord | None:
     )
 
 
+_SCHEDULE_TYPE_CHECK_PROMPT = """\
+Look at this electrical construction drawing page. What type of schedule \
+table(s) does it contain?
+
+Answer with ONLY one of these categories:
+- "luminaire" — if it contains a LIGHT FIXTURE SCHEDULE or LUMINAIRE SCHEDULE
+- "panel" — if it contains PANEL BOARD schedules, DISTRIBUTION BOARD schedules
+- "motor" — if it contains a MOTOR SCHEDULE
+- "other" — if it contains other types of schedules (mechanical, plumbing, etc.)
+- "mixed" — if it contains BOTH a luminaire schedule AND other schedule types
+
+Reply with ONLY the single category word, nothing else.
+"""
+
+
+def check_schedule_type_vlm(
+    page_info: PageInfo,
+    image_bytes: bytes,
+    config: MedinaConfig | None = None,
+) -> str:
+    """Quick VLM check to determine what type of schedule a page contains.
+
+    Returns one of: "luminaire", "panel", "motor", "other", "mixed", "unknown".
+    """
+    if config is None:
+        config = get_config()
+
+    sheet = page_info.sheet_code or f"page_{page_info.page_number}"
+
+    if not config.anthropic_api_key:
+        return "unknown"
+
+    try:
+        from anthropic import Anthropic
+    except ImportError:
+        return "unknown"
+
+    encoded_image = base64.b64encode(image_bytes).decode()
+
+    try:
+        client = Anthropic(api_key=config.anthropic_api_key)
+        message = client.messages.create(
+            model=config.vision_model,
+            max_tokens=20,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": encoded_image,
+                            },
+                        },
+                        {"type": "text", "text": _SCHEDULE_TYPE_CHECK_PROMPT},
+                    ],
+                }
+            ],
+        )
+    except Exception as exc:
+        logger.warning("VLM schedule type check failed for %s: %s", sheet, exc)
+        return "unknown"
+
+    response_text = ""
+    for block in message.content:
+        if hasattr(block, "text"):
+            response_text += block.text
+
+    result = response_text.strip().lower().split()[0] if response_text.strip() else "unknown"
+    valid = {"luminaire", "panel", "motor", "other", "mixed"}
+    if result not in valid:
+        result = "unknown"
+
+    logger.info("VLM schedule type check for %s: %s", sheet, result)
+    return result
+
+
 def extract_schedule_vlm(
     page_info: PageInfo,
     image_bytes: bytes,

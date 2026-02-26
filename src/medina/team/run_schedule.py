@@ -65,16 +65,23 @@ def run(source: str, work_dir: str, hints=None, source_key: str = "", project_id
     logger.info("[SCHEDULE] Loading PDF for schedule extraction...")
     pages_raw, pdf_pages = load(source_path)
 
-    # Reconstruct classified pages from search results
+    # Use page classifications from search_result.json (preserves VLM
+    # fallback classifications that text-based re-classification would lose).
     pages = [PageInfo.model_validate(p) for p in search_data["pages"]]
     sheet_index = [
         SheetIndexEntry.model_validate(e) for e in search_data["sheet_index"]
     ]
 
-    # Re-classify to ensure page_type is set (pages from JSON may lack it
-    # if the loader returns fresh PageInfo objects).
-    from medina.pdf.classifier import classify_pages
-    pages_raw = classify_pages(pages_raw, pdf_pages, sheet_index)
+    # Build a map from page_number to the search-agent's classification.
+    search_type_map: dict[int, PageType] = {
+        p.page_number: p.page_type for p in pages
+    }
+
+    # Apply search classifications to the loaded pages (which have pdf
+    # page objects attached for pdfplumber access).
+    for p in pages_raw:
+        if p.page_number in search_type_map:
+            p.page_type = search_type_map[p.page_number]
 
     schedule_pages = [
         p for p in pages_raw if p.page_type == PageType.SCHEDULE
@@ -131,14 +138,102 @@ def run(source: str, work_dir: str, hints=None, source_key: str = "", project_id
             before_filter - len(fixtures),
         )
 
-    # --- VLM fallback when pdfplumber extracted 0 valid fixtures ---
-    # Triggered when: (a) pdfplumber found no fixtures, or (b) page has
-    # image-based content.  Covers both truly rasterized pages and pages
-    # with text tables whose column headers don't match expected patterns.
-    # When no dedicated schedule pages exist, try plan pages (combo pages
-    # may have embedded schedule tables that are image-based).
+    # --- Identify luminaire schedule pages ---
+    # When multiple schedule pages exist, use VLM to pre-screen which ones
+    # contain luminaire/fixture schedules vs panel/motor/other schedules.
+    # This screening is shared by both the OCR and VLM fallback paths.
+    # IMPORTANT: Only run OCR/VLM fallback on actual schedule pages, NOT
+    # plan pages.  Plan pages are handled by the combo-page pdfplumber
+    # path above.  Running OCR on plan pages produces garbage fixtures.
     config = get_config()
-    vlm_candidates = schedule_pages if schedule_pages else plan_pages
+    all_candidates = list(schedule_pages)  # only schedule pages for OCR/VLM
+    luminaire_candidates = list(all_candidates)  # default: try all
+
+    if not fixtures and len(all_candidates) > 1 and config.anthropic_api_key:
+        from medina.schedule.vlm_extractor import check_schedule_type_vlm
+        from medina.pdf.renderer import render_page_to_image
+        import base64
+
+        screened: list = []
+        for spage in all_candidates:
+            spdf = pdf_pages.get(spage.page_number)
+            if spdf is None:
+                continue
+            label = spage.sheet_code or str(spage.page_number)
+            try:
+                screen_img = render_page_to_image(
+                    spage.source_path, spage.pdf_page_index, dpi=100,
+                )
+                stype = check_schedule_type_vlm(spage, screen_img, config)
+                if stype in ("luminaire", "mixed", "unknown"):
+                    screened.append(spage)
+                else:
+                    logger.info(
+                        "[SCHEDULE] Skipping %s — VLM identified as %s schedule",
+                        label, stype,
+                    )
+            except Exception as e:
+                logger.warning("[SCHEDULE] Pre-screen failed for %s: %s — keeping it", label, e)
+                screened.append(spage)
+        if screened:
+            luminaire_candidates = screened
+            logger.info(
+                "[SCHEDULE] VLM pre-screen kept %d of %d schedule pages: %s",
+                len(screened), len(all_candidates),
+                [p.sheet_code for p in screened],
+            )
+
+    # --- OCR fallback when pdfplumber extracted 0 valid fixtures ---
+    # Try OCR before VLM — OCR reads fixture codes more accurately on
+    # rasterized pages and doesn't require an API key.
+    if not fixtures and luminaire_candidates:
+        from medina.schedule.ocr_extractor import extract_schedule_ocr
+        from medina.pdf.renderer import render_page_to_image
+
+        for spage in luminaire_candidates:
+            spdf = pdf_pages.get(spage.page_number)
+            if spdf is None:
+                continue
+            label = spage.sheet_code or str(spage.page_number)
+            logger.info(
+                "[SCHEDULE] pdfplumber found 0 fixtures — trying OCR on %s",
+                label,
+            )
+            try:
+                ocr_dpi = 300
+                try:
+                    from medina.runtime_params import get_param
+                    ocr_dpi = get_param("schedule_render_dpi", source_key=source_key, project_id=project_id)
+                    ocr_dpi = max(ocr_dpi, 300)  # OCR needs higher DPI than VLM
+                except Exception:
+                    pass
+                img_bytes = render_page_to_image(
+                    spage.source_path, spage.pdf_page_index, dpi=ocr_dpi,
+                )
+                ocr_fixtures = extract_schedule_ocr(spage, img_bytes)
+                if ocr_fixtures:
+                    fixtures.extend(ocr_fixtures)
+                    logger.info(
+                        "[SCHEDULE] OCR extracted %d fixtures from %s: %s",
+                        len(ocr_fixtures), label,
+                        [f.code for f in ocr_fixtures],
+                    )
+            except Exception as e:
+                logger.warning("[SCHEDULE] OCR failed for %s: %s", label, e)
+
+        # Filter OCR results through the same validity check.
+        if fixtures:
+            before_filter = len(fixtures)
+            fixtures = [f for f in fixtures if _is_valid_fixture_code(f.code)]
+            if before_filter > len(fixtures):
+                logger.info(
+                    "[SCHEDULE] Filtered out %d invalid OCR fixture code(s)",
+                    before_filter - len(fixtures),
+                )
+
+    # --- VLM fallback when both pdfplumber and OCR found 0 fixtures ---
+    vlm_candidates = luminaire_candidates
+
     if not fixtures and vlm_candidates and config.anthropic_api_key:
         from medina.schedule.vlm_extractor import (
             extract_schedule_vlm,
