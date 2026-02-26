@@ -35,12 +35,9 @@ export default function LoginPage() {
       <div className="w-full max-w-md">
         {/* Logo / header */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center gap-2.5 text-2xl font-bold text-white tracking-tight">
-            <svg viewBox="0 0 28 28" fill="none" className="w-8 h-8">
-              <rect width="28" height="28" rx="6" fill="#e8942e" />
-              <path d="M7 14h14M14 7v14M9 9l10 10M19 9L9 19" stroke="white" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
-            Blueprint Estimation System
+          <div className="inline-flex items-center gap-3 text-2xl font-bold tracking-tight">
+            <img src="/cds-vision-logo.png" alt="CDS Vision" className="w-12 h-12 rounded-lg" />
+            <span className="text-blue-400">Electrical Estimation System</span>
           </div>
           <p className="mt-2 text-sm text-text-muted">
             Lighting fixture inventory extraction for electrical contractors
