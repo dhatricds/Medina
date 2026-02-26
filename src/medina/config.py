@@ -16,7 +16,7 @@ class MedinaConfig(BaseSettings):
     """Application configuration loaded from environment variables."""
 
     model_config = {
-        "env_prefix": "MEDINA_",
+        "env_prefix": "CDS_",
         "env_file": str(_ENV_FILE) if _ENV_FILE.exists() else ".env",
         "extra": "ignore",
     }

@@ -231,6 +231,22 @@ def run(source: str, work_dir: str, hints=None, source_key: str = "", project_id
                     before_filter - len(fixtures),
                 )
 
+        # Validate OCR results against plan-page codes.  If NONE of the
+        # OCR fixture codes match any code found on plan pages, the OCR
+        # likely read garbage (e.g., panel schedule circuit descriptions).
+        # Discard and let VLM try instead.
+        if fixtures and found_plan_codes:
+            ocr_codes = {f.code.upper() for f in fixtures}
+            plan_upper = {c.upper() for c in found_plan_codes}
+            overlap = ocr_codes & plan_upper
+            if not overlap:
+                logger.warning(
+                    "[SCHEDULE] OCR codes %s have NO overlap with plan codes %s "
+                    "— discarding OCR results (likely panel schedule garbage)",
+                    sorted(ocr_codes), sorted(plan_upper),
+                )
+                fixtures = []
+
     # --- VLM fallback when both pdfplumber and OCR found 0 fixtures ---
     vlm_candidates = luminaire_candidates
 
