@@ -149,7 +149,7 @@ def run(source: str, work_dir: str, hints=None, source_key: str = "", project_id
     all_candidates = list(schedule_pages)  # only schedule pages for OCR/VLM
     luminaire_candidates = list(all_candidates)  # default: try all
 
-    if not fixtures and len(all_candidates) > 1 and config.anthropic_api_key:
+    if not fixtures and len(all_candidates) > 1 and config.has_vlm_key:
         from medina.schedule.vlm_extractor import check_schedule_type_vlm
         from medina.pdf.renderer import render_page_to_image
         import base64
@@ -234,7 +234,7 @@ def run(source: str, work_dir: str, hints=None, source_key: str = "", project_id
     # --- VLM fallback when both pdfplumber and OCR found 0 fixtures ---
     vlm_candidates = luminaire_candidates
 
-    if not fixtures and vlm_candidates and config.anthropic_api_key:
+    if not fixtures and vlm_candidates and config.has_vlm_key:
         from medina.schedule.vlm_extractor import (
             extract_schedule_vlm,
         )

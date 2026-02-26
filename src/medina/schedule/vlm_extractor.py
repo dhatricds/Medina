@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import re
@@ -192,46 +191,21 @@ def check_schedule_type_vlm(
 
     sheet = page_info.sheet_code or f"page_{page_info.page_number}"
 
-    if not config.anthropic_api_key:
+    try:
+        from medina.vlm_client import get_vlm_client
+        vlm = get_vlm_client(config)
+    except Exception:
         return "unknown"
 
     try:
-        from anthropic import Anthropic
-    except ImportError:
-        return "unknown"
-
-    encoded_image = base64.b64encode(image_bytes).decode()
-
-    try:
-        client = Anthropic(api_key=config.anthropic_api_key)
-        message = client.messages.create(
-            model=config.vision_model,
+        response_text = vlm.vision_query(
+            images=[image_bytes],
+            prompt=_SCHEDULE_TYPE_CHECK_PROMPT,
             max_tokens=20,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": encoded_image,
-                            },
-                        },
-                        {"type": "text", "text": _SCHEDULE_TYPE_CHECK_PROMPT},
-                    ],
-                }
-            ],
         )
     except Exception as exc:
         logger.warning("VLM schedule type check failed for %s: %s", sheet, exc)
         return "unknown"
-
-    response_text = ""
-    for block in message.content:
-        if hasattr(block, "text"):
-            response_text += block.text
 
     result = response_text.strip().lower().split()[0] if response_text.strip() else "unknown"
     valid = {"luminaire", "panel", "motor", "other", "mixed"}
@@ -272,20 +246,8 @@ def extract_schedule_vlm(
     sheet = page_info.sheet_code or f"page_{page_info.page_number}"
     logger.info("VLM schedule extraction on %s", sheet)
 
-    if not config.anthropic_api_key:
-        raise VisionAPIError(
-            "Anthropic API key not configured for VLM schedule extraction. "
-            "Set MEDINA_ANTHROPIC_API_KEY in environment or .env file."
-        )
-
-    try:
-        from anthropic import Anthropic
-    except ImportError as exc:
-        raise VisionAPIError(
-            "anthropic package not installed. Run: pip install anthropic"
-        ) from exc
-
-    encoded_image = base64.b64encode(image_bytes).decode()
+    from medina.vlm_client import get_vlm_client
+    vlm = get_vlm_client(config)
 
     # Build the prompt, optionally including plan codes as hints
     prompt = _SCHEDULE_EXTRACTION_PROMPT
@@ -300,39 +262,15 @@ def extract_schedule_vlm(
         )
 
     try:
-        client = Anthropic(api_key=config.anthropic_api_key)
-        message = client.messages.create(
-            model=config.vision_model,
+        response_text = vlm.vision_query(
+            images=[image_bytes],
+            prompt=prompt,
             max_tokens=8000,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": encoded_image,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        },
-                    ],
-                }
-            ],
         )
     except Exception as exc:
         raise VisionAPIError(
             f"VLM schedule extraction API call failed for {sheet}: {exc}"
         ) from exc
-
-    response_text = ""
-    for block in message.content:
-        if hasattr(block, "text"):
-            response_text += block.text
 
     if not response_text:
         logger.warning(

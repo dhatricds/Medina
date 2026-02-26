@@ -87,7 +87,7 @@ def run_pipeline(
     if (
         not sheet_index
         and (not plan_pages_info or not schedule_pages_info)
-        and config.anthropic_api_key
+        and config.has_vlm_key
     ):
         vlm_candidates = [
             p for p in pages
@@ -187,7 +187,7 @@ def run_pipeline(
     vlm_sched_candidates = (
         schedule_pages_info if schedule_pages_info else plan_pages_info
     )
-    if not fixtures and vlm_sched_candidates and config.anthropic_api_key:
+    if not fixtures and vlm_sched_candidates and config.has_vlm_key:
         from medina.schedule.vlm_extractor import (
             extract_schedule_vlm,
         )
@@ -322,7 +322,7 @@ def run_pipeline(
                 "COUNT",
                 f"Short fixture codes {short_list} — auto-triggering VLM recount",
             )
-        should_run_vlm = (use_vision or has_short_codes) and config.anthropic_api_key
+        should_run_vlm = (use_vision or has_short_codes) and config.has_vlm_key
         if should_run_vlm:
             report("COUNT", "Running vision-based counting (VLM)...")
             try:
@@ -404,7 +404,7 @@ def run_pipeline(
         # detection (finds numbers inside diamond/hexagon shapes).
         # VLM fallback is only used when the text-based detection
         # found zero counts for all keynotes on a plan page.
-        if config.anthropic_api_key and all_keynotes:
+        if config.has_vlm_key and all_keynotes:
             keynote_numbers = [
                 str(kn.number) for kn in all_keynotes
             ]

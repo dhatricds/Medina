@@ -7,7 +7,6 @@ symbol style used, then count those symbols on the plan.
 
 from __future__ import annotations
 
-import base64
 import io
 import json
 import logging
@@ -194,17 +193,10 @@ def count_keynotes_vision(
     if not keynote_numbers:
         return {}
 
-    if not config.anthropic_api_key:
+    if not config.has_vlm_key:
         raise VisionAPIError(
-            "Anthropic API key not configured for VLM keynote counting."
+            "No VLM API key configured for keynote counting."
         )
-
-    try:
-        from anthropic import Anthropic
-    except ImportError as exc:
-        raise VisionAPIError(
-            "anthropic package not installed."
-        ) from exc
 
     # For viewport sub-plans, the shared KEYED NOTES legend sits outside
     # the viewport bbox (e.g., at the far right of the full page).  We
@@ -245,54 +237,22 @@ def count_keynotes_vision(
     legend_bytes = _crop_legend_area(full_page_image)
     drawing_bytes = _crop_drawing_area(viewport_image)
 
-    legend_encoded = base64.b64encode(legend_bytes).decode()
-    drawing_encoded = base64.b64encode(drawing_bytes).decode()
-
     prompt = _build_prompt(keynote_numbers, sheet)
 
+    from medina.vlm_client import get_vlm_client
+    vlm = get_vlm_client(config)
+
     try:
-        client = Anthropic(api_key=config.anthropic_api_key)
-        message = client.messages.create(
-            model=config.vision_model,
+        response_text = vlm.vision_query(
+            images=[legend_bytes, drawing_bytes],
+            prompt=prompt,
             max_tokens=4000,
             temperature=0,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": legend_encoded,
-                            },
-                        },
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": drawing_encoded,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        },
-                    ],
-                }
-            ],
         )
     except Exception as exc:
         raise VisionAPIError(
             f"VLM keynote counting API call failed for {sheet}: {exc}"
         ) from exc
-
-    response_text = ""
-    for block in message.content:
-        if hasattr(block, "text"):
-            response_text += block.text
 
     if not response_text:
         logger.warning(

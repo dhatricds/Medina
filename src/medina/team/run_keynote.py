@@ -89,7 +89,7 @@ def run(source: str, work_dir: str, source_key: str = "", project_id: str = "", 
     # suspiciously low relative to the number of keynotes defined on
     # that page (indicates geometric/text detection failed).
     config = get_config()
-    if config.anthropic_api_key and all_keynotes:
+    if config.has_vlm_key and all_keynotes:
         keynote_numbers = list(dict.fromkeys(
             str(kn.number) for kn in all_keynotes
         ))

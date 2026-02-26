@@ -168,7 +168,7 @@ def run(source: str, work_dir: str, hints=None) -> dict:
     if not sheet_index and (not plan_pages or not schedule_pages):
         from medina.config import get_config
         config = get_config()
-        if config.anthropic_api_key:
+        if config.has_vlm_key:
             vlm_candidates = [
                 p for p in pages
                 if p.page_type in (

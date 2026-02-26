@@ -442,6 +442,57 @@ async def delete_dashboard_project(dashboard_id: str, request: Request):
     return {"deleted": dashboard_id}
 
 
+DATA_DIR = Path(__file__).resolve().parents[4] / "data"
+TRAIN_DIR = Path(__file__).resolve().parents[4] / "train"
+UPLOADS_DIR = Path(__file__).resolve().parents[4] / "uploads"
+
+
+def _resolve_source_pdf(entry: dict, project_data: dict) -> Path | None:
+    """Try multiple strategies to find the source PDF for a dashboard project.
+
+    Priority:
+    1. Explicit source_path in index entry
+    2. source_path / source field in project JSON
+    3. Fuzzy match by project_name in data/ and train/ directories
+    """
+    project_root = Path(__file__).resolve().parents[4]
+
+    # Strategy 1 & 2: explicit paths
+    for candidate_str in [
+        entry.get("source_path", ""),
+        project_data.get("source_path", ""),
+        project_data.get("source", ""),
+    ]:
+        if not candidate_str:
+            continue
+        candidate = Path(candidate_str)
+        if not candidate.is_absolute():
+            candidate = project_root / candidate
+        if candidate.exists():
+            return candidate
+
+    # Strategy 3: fuzzy match by project_name in data/ and train/
+    project_name = project_data.get("project_name", entry.get("name", ""))
+    if not project_name:
+        return None
+
+    # Normalize for matching: lowercase, remove parens content, strip
+    norm_name = re.sub(r"\([\d]+\)", "", project_name).strip().lower()
+
+    for search_dir in [DATA_DIR, TRAIN_DIR, UPLOADS_DIR]:
+        if not search_dir.exists():
+            continue
+        for item in search_dir.iterdir():
+            if item.suffix.lower() == ".pdf" or item.is_dir():
+                item_norm = re.sub(r"\([\d]+\)", "", item.stem).strip().lower()
+                # Also strip _inventory suffix from train files
+                item_norm = item_norm.replace("_inventory", "")
+                if item_norm == norm_name or norm_name in item_norm or item_norm in norm_name:
+                    return item
+
+    return None
+
+
 @router.post("/{dashboard_id}/edit")
 async def edit_dashboard_project(dashboard_id: str, request: Request):
     """Open an approved dashboard project for editing in the workspace.
@@ -463,24 +514,12 @@ async def edit_dashboard_project(dashboard_id: str, request: Request):
     with open(project_json_path) as f:
         project_data = json.load(f)
 
-    # Resolve source PDF path — try index entry, then JSON fields
-    source_path_str = (
-        entry.get("source_path")
-        or project_data.get("source_path")
-        or project_data.get("source", "")
-    )
-    if not source_path_str:
-        raise HTTPException(status_code=400, detail="Source PDF path not available for this project")
-
-    source_path = Path(source_path_str)
-    if not source_path.is_absolute():
-        # Relative to project root
-        project_root = Path(__file__).resolve().parents[4]
-        source_path = project_root / source_path
-    if not source_path.exists():
+    # Resolve source PDF path using multi-strategy resolver
+    source_path = _resolve_source_pdf(entry, project_data)
+    if not source_path:
         raise HTTPException(
             status_code=400,
-            detail=f"Source PDF not found: {source_path.name}. The original file may have been moved.",
+            detail="Source PDF not found. The original file may have been moved or deleted.",
         )
 
     # Determine output_path: prefer dashboard positions file, fall back to original
@@ -495,6 +534,98 @@ async def edit_dashboard_project(dashboard_id: str, request: Request):
     if not dashboard_positions.exists() and original_output:
         # Fall back to original output path if dashboard positions don't exist
         output_base = original_output
+
+    # Build pages array and total_pages if missing (seed/older projects)
+    if not project_data.get("pages") or not project_data.get("total_pages"):
+        try:
+            import fitz as pymupdf
+            known_plans = set(project_data.get("lighting_plans", []))
+            known_schedules = set(project_data.get("schedule_pages", []))
+            all_known = known_plans | known_schedules
+            _MIN_TITLE_FONT = 15.0
+            _code_re = re.compile(
+                r"\b([A-Z]\d{1,4}[A-Za-z]?(?:\.\d+[A-Za-z]?)?)\b"
+            )
+
+            if source_path.is_file() and source_path.suffix.lower() == ".pdf":
+                doc = pymupdf.open(str(source_path))
+                num_pages = len(doc)
+                project_data["total_pages"] = num_pages
+                if not project_data.get("pages"):
+                    # Map known plan/schedule codes to pages via large-font matching
+                    code_to_page: dict[str, int] = {}
+                    for i in range(num_pages):
+                        page = doc[i]
+                        blocks = page.get_text("dict")["blocks"]
+                        best_code = None
+                        best_size = 0.0
+                        for b in blocks:
+                            if "lines" not in b:
+                                continue
+                            for line_obj in b["lines"]:
+                                for span in line_obj["spans"]:
+                                    if span["size"] < _MIN_TITLE_FONT:
+                                        continue
+                                    for m in _code_re.finditer(span["text"].strip()):
+                                        code = m.group(1).upper()
+                                        if code in all_known and span["size"] > best_size:
+                                            best_code = code
+                                            best_size = span["size"]
+                        if best_code and best_code not in code_to_page:
+                            code_to_page[best_code] = i + 1
+
+                    pages_list = []
+                    for i in range(num_pages):
+                        page_num = i + 1
+                        # Find which known code maps to this page
+                        sheet_code = None
+                        page_type = "other"
+                        for code, pn in code_to_page.items():
+                            if pn == page_num:
+                                sheet_code = code
+                                if code in known_plans:
+                                    page_type = "lighting_plan"
+                                elif code in known_schedules:
+                                    page_type = "schedule"
+                                break
+                        pages_list.append({
+                            "page_number": page_num,
+                            "sheet_code": sheet_code or f"pg{page_num}",
+                            "description": "",
+                            "type": page_type,
+                            "source_path": str(source_path),
+                            "pdf_page_index": i,
+                        })
+                    project_data["pages"] = pages_list
+                doc.close()
+            elif source_path.is_dir():
+                pdf_files = sorted(source_path.glob("*.pdf"))
+                project_data["total_pages"] = len(pdf_files)
+                if not project_data.get("pages"):
+                    pages_list = []
+                    for idx, pdf_file in enumerate(pdf_files):
+                        fname = pdf_file.stem
+                        sheet_code = None
+                        m = re.match(r"\d+---(\S+)", fname)
+                        if m:
+                            sheet_code = m.group(1)
+                        page_type = "other"
+                        if sheet_code:
+                            if sheet_code in known_plans:
+                                page_type = "lighting_plan"
+                            elif sheet_code in known_schedules:
+                                page_type = "schedule"
+                        pages_list.append({
+                            "page_number": idx + 1,
+                            "sheet_code": sheet_code or f"pg{idx + 1}",
+                            "description": fname,
+                            "type": page_type,
+                            "source_path": str(pdf_file),
+                            "pdf_page_index": 0,
+                        })
+                    project_data["pages"] = pages_list
+        except Exception as e:
+            logger.warning("Failed to build pages for dashboard edit: %s", e)
 
     # Create an in-memory project state
     from medina.api.projects import ProjectState, _projects

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import io
 import json
 import logging
@@ -156,18 +155,12 @@ def count_fixtures_vision(
         logger.warning("No fixture codes provided for vision counting")
         return {}
 
-    if not config.anthropic_api_key:
+    if not config.has_vlm_key:
         raise VisionAPIError(
-            "Anthropic API key not configured. "
-            "Set MEDINA_ANTHROPIC_API_KEY in environment or .env file."
+            "No VLM API key configured. "
+            "Set MEDINA_ANTHROPIC_API_KEY, MEDINA_GEMINI_API_KEY, "
+            "or MEDINA_OPENROUTER_API_KEY in environment or .env file."
         )
-
-    try:
-        from anthropic import Anthropic
-    except ImportError as exc:
-        raise VisionAPIError(
-            "anthropic package not installed. Run: pip install anthropic"
-        ) from exc
 
     prompt = _build_prompt(fixture_codes, sheet)
 
@@ -197,43 +190,19 @@ def count_fixtures_vision(
         except Exception as e:
             logger.warning("Viewport crop failed for %s: %s", sheet, e)
 
-    encoded_image = base64.b64encode(img_to_send).decode()
+    from medina.vlm_client import get_vlm_client
+    vlm = get_vlm_client(config)
 
     try:
-        client = Anthropic(api_key=config.anthropic_api_key)
-        message = client.messages.create(
-            model=config.vision_model,
+        response_text = vlm.vision_query(
+            images=[img_to_send],
+            prompt=prompt,
             max_tokens=2000,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": encoded_image,
-                            },
-                        },
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        },
-                    ],
-                }
-            ],
         )
     except Exception as exc:
         raise VisionAPIError(
             f"Vision API call failed for plan {sheet}: {exc}"
         ) from exc
-
-    # Extract text content from the response.
-    response_text = ""
-    for block in message.content:
-        if hasattr(block, "text"):
-            response_text += block.text
 
     if not response_text:
         logger.warning("Empty response from vision API for plan %s", sheet)

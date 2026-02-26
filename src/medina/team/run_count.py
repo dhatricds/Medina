@@ -107,7 +107,7 @@ def run(source: str, work_dir: str, use_vision: bool = False, hints=None,
     has_short_codes = any(len(fc) == 1 for fc in fixture_codes)
     should_run_vlm = (
         (use_vision or has_short_codes)
-        and config.anthropic_api_key
+        and config.has_vlm_key
         and plan_pages
     )
     if has_short_codes and not use_vision:

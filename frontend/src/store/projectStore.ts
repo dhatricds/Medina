@@ -416,8 +416,10 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
       // Load any existing feedback
       get().loadFeedback(project_id);
-    } catch (e) {
+    } catch (e: any) {
+      const msg = e?.message || 'Failed to open project for editing';
       console.error('Failed to open dashboard project for editing:', e);
+      set({ error: msg });
     }
   },
 
