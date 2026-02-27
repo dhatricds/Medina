@@ -307,19 +307,19 @@ export default function PdfViewer() {
         {/* margin:0 auto centers horizontally; width:fit-content lets it grow with zoom */}
         <div style={{ margin: '0 auto', width: 'fit-content' }}>
           {pagePdfUrl && !pdfError ? (
-            <Document
-              key={`${projectId}-${currentPage}`}
-              file={pagePdfUrl}
-              onLoadSuccess={onDocumentLoadSuccess}
-              onLoadError={onDocumentLoadError}
-              loading={
-                <div className="text-center text-slate-500">
-                  <div className="w-12 h-12 border-4 border-accent/30 border-t-accent rounded-full animate-spin mx-auto mb-4" />
-                  <p className="text-sm">Loading PDF...</p>
-                </div>
-              }
-            >
-              <div className="relative">
+            <div className="relative">
+              <Document
+                key={`${projectId}-${currentPage}`}
+                file={pagePdfUrl}
+                onLoadSuccess={onDocumentLoadSuccess}
+                onLoadError={onDocumentLoadError}
+                loading={
+                  <div className="text-center text-slate-500">
+                    <div className="w-12 h-12 border-4 border-accent/30 border-t-accent rounded-full animate-spin mx-auto mb-4" />
+                    <p className="text-sm">Loading PDF...</p>
+                  </div>
+                }
+              >
                 <Page
                   pageNumber={1}
                   width={pageWidth}
@@ -330,28 +330,36 @@ export default function PdfViewer() {
                     <div className="text-slate-500 text-sm">Rendering page...</div>
                   }
                 />
-                {(highlight.fixtureCode || highlight.keynoteNumber) && (
-                  <FixtureOverlay
-                    renderedWidth={renderedWidth}
-                    renderedHeight={renderedHeight}
-                  />
-                )}
-              </div>
-            </Document>
+              </Document>
+              {(highlight.fixtureCode || highlight.keynoteNumber) && (
+                <FixtureOverlay
+                  renderedWidth={renderedWidth}
+                  renderedHeight={renderedHeight}
+                />
+              )}
+            </div>
           ) : hasProject && pdfError ? (
             /* Fallback: image rendering with DPI scaled to zoom level */
-            <img
-              key={`img-${currentPage}-${imageDpi}`}
-              src={getPageImageUrl(projectId, currentPage, imageDpi)}
-              alt={`Page ${currentPage}`}
-              className="object-contain rounded shadow-lg"
-              style={{
-                width: `${zoom * 100}%`,
-                maxWidth: 'none',
-              }}
-              draggable={false}
-              onError={() => {}}
-            />
+            <div className="relative">
+              <img
+                key={`img-${currentPage}-${imageDpi}`}
+                src={getPageImageUrl(projectId, currentPage, imageDpi)}
+                alt={`Page ${currentPage}`}
+                className="object-contain rounded shadow-lg"
+                style={{
+                  width: `${zoom * 100}%`,
+                  maxWidth: 'none',
+                }}
+                draggable={false}
+                onError={() => {}}
+              />
+              {(highlight.fixtureCode || highlight.keynoteNumber) && (
+                <FixtureOverlay
+                  renderedWidth={renderedWidth}
+                  renderedHeight={renderedHeight}
+                />
+              )}
+            </div>
           ) : appState === 'processing' ? (
             <div className="text-center text-slate-500">
               <div className="w-12 h-12 border-4 border-accent/30 border-t-accent rounded-full animate-spin mx-auto mb-4" />

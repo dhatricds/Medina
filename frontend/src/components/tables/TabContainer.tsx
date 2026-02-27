@@ -101,7 +101,7 @@ export default function TabContainer() {
             </div>
           </div>
         </div>
-        {chatOpen && <ChatPanel />}
+        <div className={chatOpen ? '' : 'hidden'}><ChatPanel /></div>
       </div>
     );
   }
@@ -129,7 +129,7 @@ export default function TabContainer() {
             </div>
           </div>
         </div>
-        {chatOpen && <ChatPanel />}
+        <div className={chatOpen ? '' : 'hidden'}><ChatPanel /></div>
       </div>
     );
   }
@@ -215,8 +215,8 @@ export default function TabContainer() {
         </div>
       </div>
 
-      {/* Chat Panel (replaces Fix It) */}
-      {chatOpen && appState === 'complete' && <ChatPanel />}
+      {/* Chat Panel — kept mounted to preserve state */}
+      {appState === 'complete' && <div className={chatOpen ? '' : 'hidden'}><ChatPanel /></div>}
 
       {/* Table */}
       {activeTab === 'lighting' ? <FixtureTable /> : <KeynoteTable />}

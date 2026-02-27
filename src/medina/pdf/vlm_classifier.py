@@ -24,8 +24,8 @@ You are analyzing electrical construction drawing pages from a PDF. \
 Your task is to classify each page into one or more of these categories:
 
 - "luminaire_schedule": A page that contains a LIGHT FIXTURE SCHEDULE table \
-(also called a Luminaire Schedule). This is a TABLE with columns like TYPE, \
-DESCRIPTION, VOLTAGE, MOUNTING, LUMENS, CCT, etc. \
+(also called a Luminaire Schedule or Ceiling Fan Schedule). This is a TABLE \
+with columns like TYPE, DESCRIPTION, VOLTAGE, MOUNTING, LUMENS, CCT, etc. \
 Do NOT confuse with Panel Schedules, Motor Schedules, or Equipment Schedules.
 
 - "lighting_plan": A page that shows a FLOOR PLAN with lighting fixture \

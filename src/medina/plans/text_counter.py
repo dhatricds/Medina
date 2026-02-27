@@ -167,7 +167,48 @@ def _find_schedule_table_bbox(
             best_matches = matches
             best_bbox = table.bbox
 
-    if best_matches >= 3:
+    if best_matches >= 3 and best_bbox:
+        # Guard: reject tables whose area exceeds 50% of the page.
+        # pdfplumber sometimes detects the drawing border as a single
+        # "table" whose first-row cell contains ALL page text — general
+        # notes mentioning "luminaire", "fixture", "mounting", etc.
+        # trigger a false-positive.  Real embedded schedule tables on
+        # combo pages are always a small portion of the page.
+        page_area = float(pdf_page.width) * float(pdf_page.height)
+        table_area = (best_bbox[2] - best_bbox[0]) * (best_bbox[3] - best_bbox[1])
+        if page_area > 0 and (table_area / page_area) > 0.50:
+            logger.debug(
+                "Rejecting schedule table detection — covers %.1f%% of page "
+                "(bbox: %s, %d keyword matches)",
+                100.0 * table_area / page_area, best_bbox, best_matches,
+            )
+            return None
+
+        # Guard: reject when the "header" cell text is implausibly long.
+        # A real schedule header row has short column labels (TYPE, VOLTAGE,
+        # etc.) — maybe 200 chars total.  If the header text exceeds 500
+        # chars it's almost certainly the full page text merged into one
+        # cell (drawing border false-positive).
+        try:
+            rows = None
+            for table in tables:
+                if table.bbox == best_bbox:
+                    rows = table.extract()
+                    break
+            if rows:
+                header_text = " ".join(
+                    str(cell) for cell in rows[0] if cell
+                )
+                if len(header_text) > 500:
+                    logger.debug(
+                        "Rejecting schedule table — header too long (%d chars), "
+                        "likely drawing border false-positive",
+                        len(header_text),
+                    )
+                    return None
+        except Exception:
+            pass
+
         logger.debug(
             "Found schedule table on plan page (bbox: %s, %d keyword matches)",
             best_bbox, best_matches,

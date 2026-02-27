@@ -28,8 +28,11 @@ export default function ChatPanel() {
   const [confirming, setConfirming] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Load history on mount
+  // Load history when project changes — clear old messages first
   useEffect(() => {
+    setMessages([]);
+    setPendingActions(null);
+    setSuggestions([]);
     if (!projectId) return;
     getChatHistory(projectId).then((data) => {
       setMessages(data.messages || []);
@@ -80,8 +83,7 @@ export default function ChatPanel() {
         } else if (resp.highlight.keynote_number) {
           store.highlightKeynote(resp.highlight.keynote_number, resp.highlight.plan);
         }
-        // Minimize chat so user can see PDF + markers
-        store.setChatOpen(false);
+        // Keep chat open so user can continue conversation
       }
 
       // If actions need confirmation

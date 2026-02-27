@@ -44,13 +44,18 @@ export default function FixtureOverlay({ renderedWidth, renderedHeight }: Props)
     );
   }
 
-  // No positions — just a click-to-dismiss overlay (controls shown in PdfViewer's sticky bar)
+  // No positions — show info message and click-to-dismiss overlay
   if (positions.length === 0 && addedPositions.length === 0 && !loading) {
     return (
       <div
-        className="absolute inset-0 z-20 cursor-pointer"
+        className="absolute inset-0 z-20 cursor-pointer flex items-end justify-center pb-4"
         onClick={clearHighlight}
-      />
+      >
+        <div className="bg-black/70 text-white px-4 py-2 rounded-lg text-xs text-center shadow-lg pointer-events-none">
+          <p className="font-medium">No marker positions available for {fixtureCode ?? `keynote #${keynoteNumber}`}</p>
+          <p className="text-white/70 mt-0.5">This PDF uses image-based content — counts were extracted by AI vision</p>
+        </div>
+      </div>
     );
   }
 

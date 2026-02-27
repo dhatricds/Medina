@@ -163,9 +163,10 @@ def run(source: str, work_dir: str, hints=None) -> dict:
     )
 
     # --- VLM Classification Fallback ---
-    # When no sheet index and missing plan or schedule pages, use Claude
-    # Vision to classify unidentified pages.
-    if not sheet_index and (not plan_pages or not schedule_pages):
+    # When missing plan or schedule pages, use VLM to classify
+    # unidentified pages.  Triggers regardless of whether a sheet index
+    # exists — a garbled/incomplete index shouldn't block VLM.
+    if not plan_pages or not schedule_pages:
         from medina.config import get_config
         config = get_config()
         if config.has_vlm_key:
@@ -173,12 +174,15 @@ def run(source: str, work_dir: str, hints=None) -> dict:
                 p for p in pages
                 if p.page_type in (
                     PageType.OTHER, PageType.POWER_PLAN, PageType.DETAIL,
+                    PageType.COVER,
                 )
             ]
             if vlm_candidates:
                 logger.info(
-                    "[SEARCH] No sheet index — running VLM fallback on "
+                    "[SEARCH] Missing %s — running VLM classification on "
                     "%d candidate page(s)...",
+                    ("plans and schedules" if not plan_pages and not schedule_pages
+                     else "plans" if not plan_pages else "schedules"),
                     len(vlm_candidates),
                 )
                 try:
@@ -200,17 +204,27 @@ def run(source: str, work_dir: str, hints=None) -> dict:
                         p for p in pages
                         if p.page_type == PageType.SCHEDULE
                     ]
+                    # Assign pg{N} fallback codes to newly classified pages
+                    for p in plan_pages + schedule_pages:
+                        if not p.sheet_code:
+                            p.sheet_code = f"pg{p.page_number}"
+                            logger.info(
+                                "[SEARCH] Assigned fallback code %s to "
+                                "VLM-classified page %d (%s)",
+                                p.sheet_code, p.page_number,
+                                p.page_type.value,
+                            )
                     plan_codes = [
-                        p.sheet_code for p in plan_pages if p.sheet_code
+                        p.sheet_code for p in plan_pages
                     ]
                     schedule_codes = [
-                        p.sheet_code or str(p.page_number)
-                        for p in schedule_pages
+                        p.sheet_code for p in schedule_pages
                     ]
                     logger.info(
-                        "[SEARCH] After VLM: %d lighting plans, %d schedules",
-                        len(plan_pages),
-                        len(schedule_pages),
+                        "[SEARCH] After VLM: %d lighting plans (%s), "
+                        "%d schedules (%s)",
+                        len(plan_pages), plan_codes,
+                        len(schedule_pages), schedule_codes,
                     )
                 except Exception as e:
                     logger.warning(

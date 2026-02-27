@@ -898,7 +898,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       },
     };
   }),
-  setProjectId: (id) => set({ projectId: id }),
+  setProjectId: (id) => set({ projectId: id, highlight: { ...emptyHighlight } }),
   setCurrentPage: (page) => set({ currentPage: page }),
   setTotalPages: (pages) => set({ totalPages: pages }),
   setSseActive: (active) => set({ sseActive: active }),
@@ -1025,6 +1025,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         currentPage: 1,
         reprocessDiffs: diffs,
         preReprocessData: null,
+        highlight: { ...emptyHighlight },
       });
       // Load any existing feedback for this project
       get().loadFeedback(projectId);

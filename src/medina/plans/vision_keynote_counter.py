@@ -3,6 +3,9 @@
 Strategy: Two-image approach — sends both a cropped KEY NOTES legend
 and the cropped drawing area to the VLM so it can see the actual
 symbol style used, then count those symbols on the plan.
+
+Also provides full keynote extraction (definitions + counts) for
+garbled/image-based PDFs where text extraction fails entirely.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from PIL import Image
 
 from medina.config import MedinaConfig, get_config
 from medina.exceptions import VisionAPIError
-from medina.models import PageInfo
+from medina.models import KeyNote, PageInfo
 
 logger = logging.getLogger(__name__)
 
@@ -271,3 +274,185 @@ def count_keynotes_vision(
         sheet, total, sum(1 for c in counts.values() if c > 0),
     )
     return counts
+
+
+# ── Full VLM keynote extraction (definitions + counts) ──────────────
+
+_EXTRACT_KEYNOTES_PROMPT = """\
+You are analyzing an electrical lighting plan drawing.
+This is sheet {sheet_code}.
+
+IMAGE 1 shows the KEY NOTES LEGEND area (right side of the drawing).
+IMAGE 2 shows the FLOOR PLAN DRAWING area.
+
+TASKS:
+1. Read the KEY NOTES legend in IMAGE 1. Extract each keynote:
+   - number (the digit inside a geometric shape like diamond/circle/hexagon)
+   - text (the description next to it — first sentence only, keep it short)
+
+2. For each keynote number found, count how many times that keynote
+   symbol appears on the FLOOR PLAN in IMAGE 2. Only count numbers
+   that are enclosed in the SAME geometric shape as in the legend.
+   Do NOT count bare circuit numbers, switch legs, or panel IDs.
+
+RESPOND WITH ONLY A JSON OBJECT. NO EXPLANATIONS. NO THINKING.
+Format:
+{{"keynotes": [{{"number": "1", "text": "first sentence of keynote text", "count": 3}}, ...]}}
+"""
+
+
+def _extract_json_from_response(text: str) -> dict | None:
+    """Extract JSON from a VLM response, handling truncation and noise."""
+    # Try code fence first
+    fence_match = re.search(
+        r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', text,
+    )
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Try bare JSON object
+    brace_match = re.search(r'\{[\s\S]*\}', text)
+    if brace_match:
+        try:
+            return json.loads(brace_match.group(0))
+        except json.JSONDecodeError:
+            # Truncated response — try to recover partial keynotes array
+            raw = brace_match.group(0)
+            # Find all complete {...} objects inside the keynotes array
+            objs = re.findall(r'\{[^{}]+\}', raw)
+            recovered: list[dict] = []
+            for obj_str in objs:
+                try:
+                    obj = json.loads(obj_str)
+                    if "number" in obj:
+                        recovered.append(obj)
+                except json.JSONDecodeError:
+                    continue
+            if recovered:
+                return {"keynotes": recovered}
+
+    # Try bare key-value pairs without outer braces
+    if '"number"' in text and '"text"' in text:
+        objs = re.findall(r'\{[^{}]+\}', text)
+        recovered = []
+        for obj_str in objs:
+            try:
+                obj = json.loads(obj_str)
+                if "number" in obj:
+                    recovered.append(obj)
+            except json.JSONDecodeError:
+                continue
+        if recovered:
+            return {"keynotes": recovered}
+
+    return None
+
+
+def extract_and_count_keynotes_vlm(
+    page_info: PageInfo,
+    image_bytes: bytes,
+    config: MedinaConfig | None = None,
+) -> tuple[list[KeyNote], dict[str, int]]:
+    """Extract keynote definitions AND count symbols using VLM.
+
+    Used when text-based extraction fails entirely (garbled text,
+    image-based PDFs). Returns both KeyNote objects and per-plan counts.
+
+    Args:
+        page_info: Page metadata.
+        image_bytes: PNG image bytes of the rendered plan page.
+        config: Configuration with API key and model settings.
+
+    Returns:
+        Tuple of (list of KeyNote objects, dict of {keynote_num: count}).
+    """
+    if config is None:
+        config = get_config()
+
+    sheet = page_info.sheet_code or f"pg{page_info.page_number}"
+    logger.info("[KEYNOTE-VLM] Full extraction on plan %s", sheet)
+
+    if not config.has_vlm_key:
+        return [], {}
+
+    # Crop legend and drawing areas
+    legend_bytes = _crop_legend_area(image_bytes)
+    drawing_bytes = _crop_drawing_area(image_bytes)
+
+    prompt = _EXTRACT_KEYNOTES_PROMPT.format(sheet_code=sheet)
+
+    from medina.vlm_client import get_vlm_client
+    vlm = get_vlm_client(config)
+
+    try:
+        response_text = vlm.vision_query(
+            images=[legend_bytes, drawing_bytes],
+            prompt=prompt,
+            max_tokens=8192,
+            temperature=0,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[KEYNOTE-VLM] Full extraction API failed for %s: %s",
+            sheet, exc,
+        )
+        return [], {}
+
+    if not response_text:
+        logger.warning("[KEYNOTE-VLM] Empty response for %s", sheet)
+        return [], {}
+
+    logger.debug(
+        "[KEYNOTE-VLM] Response for %s: %s", sheet, response_text[:500],
+    )
+
+    parsed = _extract_json_from_response(response_text)
+    if not parsed or "keynotes" not in parsed:
+        logger.warning(
+            "[KEYNOTE-VLM] Could not parse response for %s: %s",
+            sheet, response_text[:300],
+        )
+        return [], {}
+
+    keynotes: list[KeyNote] = []
+    counts: dict[str, int] = {}
+
+    for entry in parsed["keynotes"]:
+        if not isinstance(entry, dict):
+            continue
+        num = str(entry.get("number", "")).strip()
+        text = str(entry.get("text", "")).strip()
+        count = 0
+        try:
+            count = int(entry.get("count", 0))
+        except (ValueError, TypeError):
+            pass
+
+        if not num:
+            continue
+
+        # Skip implausibly high keynote numbers
+        try:
+            if int(num) > 20:
+                continue
+        except ValueError:
+            pass
+
+        kn = KeyNote(
+            number=num,
+            text=text,
+            counts_per_plan={sheet: count},
+            total=count,
+        )
+        keynotes.append(kn)
+        counts[num] = count
+
+    logger.info(
+        "[KEYNOTE-VLM] Extracted %d keynotes from %s: %s",
+        len(keynotes), sheet,
+        {kn.number: kn.total for kn in keynotes},
+    )
+    return keynotes, counts

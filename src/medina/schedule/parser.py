@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 _COLUMN_PATTERNS: dict[str, list[str]] = {
     "code": [
         "fixture id",
+        "ltr type",
         "id",
         "mark",
         "fixture type",
@@ -93,6 +94,8 @@ _STRONG_FIELDS = {"code", "description", "voltage", "mounting", "lumens"}
 
 def _normalise(text: str) -> str:
     """Lower-case, strip, and collapse whitespace for matching."""
+    if not text:
+        return ""
     return " ".join(text.lower().split())
 
 
@@ -111,12 +114,18 @@ def _map_columns(header_row: list[str]) -> dict[int, str]:
     # Iterate fields in a stable order; for each field try patterns from
     # highest to lowest priority. Short patterns (<=3 chars) require
     # exact match to avoid false substring hits (e.g. "tag" in "voltage").
+    # Skip cells longer than 35 chars — real header labels are short;
+    # long cells are notes/description text that happen to contain
+    # keywords (e.g. "GENERAL NOTES: A. CATALOG NUMBER...").
+    _MAX_HEADER_CELL_LEN = 35
     for field, patterns in _COLUMN_PATTERNS.items():
         if field in used_fields:
             continue
         for pattern in patterns:
             for col_idx, cell in enumerate(normalised):
                 if col_idx in mapped:
+                    continue
+                if len(cell) > _MAX_HEADER_CELL_LEN:
                     continue
                 if len(pattern) <= 3:
                     match = pattern == cell
@@ -205,7 +214,11 @@ def _find_header_row(
             best_idx = idx + 1  # Data starts after row idx+1
             best_mapping = _map_columns(merged)
 
-    if best_idx == -1 or "code" not in best_mapping.values():
+    # A valid header row must map at least 2 different fields (e.g. code +
+    # description).  A single-column "match" is usually a false positive
+    # from a title row like "LIGHT FIXTURE SCHEDULE" where "fixture"
+    # substring-matches the code pattern.
+    if best_idx == -1 or "code" not in best_mapping.values() or len(best_mapping) < 2:
         raise ScheduleExtractionError(
             "Could not identify a header row with a fixture type/code column"
         )
@@ -306,6 +319,10 @@ def _is_data_row(row: list[str], code_col: int) -> bool:
     # Real pure-alpha fixture codes are short: A, B, EX, SL, WL.
     if code.isalpha() and len(code) > 3:
         return False
+    # Reject common table header values that aren't pure-alpha
+    _REJECT_CODES = {"NO.", "NO", "#", "QTY", "CKT"}
+    if code.upper().rstrip(".") in _REJECT_CODES or code.upper() in _REJECT_CODES:
+        return False
     return True
 
 
@@ -358,14 +375,18 @@ _NON_LUMINAIRE_TABLE_KEYWORDS = [
     "panel totals",
     "connected load",
     "revision",
-    "ceiling fan sched",
     "energy compliance",
     "circuit description",
 ]
 
 # Regex patterns that indicate a panel/breaker schedule table header.
-# "PANEL A", "PANEL B", "PANEL 1", "PANEL LP-1", etc.
-_PANEL_HEADER_RE = re.compile(r"\bpanel\s+[a-z0-9]", re.IGNORECASE)
+# Matches "PANEL A", "PANEL B", "PANEL 1", "PANEL LP-1", etc.
+# Does NOT match fixture descriptions: "FLAT PANEL", "LED PANEL",
+# "PANEL RECESSED", "PANEL LED", "AT PANEL".
+_PANEL_HEADER_RE = re.compile(
+    r"(?<!\bflat\s)(?<!\bled\s)(?<!\bat\s)\bpanel\s+(?!led\b|recessed\b|light\b|lamp\b|troffer\b|luminaire\b)[a-z0-9]",
+    re.IGNORECASE,
+)
 
 
 _LUMINAIRE_TABLE_KEYWORDS = [
@@ -373,6 +394,8 @@ _LUMINAIRE_TABLE_KEYWORDS = [
     "light fixture schedule",
     "lighting schedule",
     "fixture schedule",
+    "ceiling fan schedule",
+    "fan schedule",
 ]
 
 
@@ -380,24 +403,31 @@ def _is_luminaire_table(raw_table: list[list[str]]) -> bool:
     """Check if a table is likely a luminaire schedule (not control/panel)."""
     if not raw_table:
         return False
-    # Check first 3 rows for keywords
-    header_text = " ".join(
+    # Positive keywords: check first 3 rows (title + header + possible subheader).
+    pos_text = " ".join(
         " ".join(str(c) for c in row) for row in raw_table[:3]
     ).lower()
 
     # Positive match: explicitly a luminaire schedule
     for keyword in _LUMINAIRE_TABLE_KEYWORDS:
-        if keyword in header_text:
+        if keyword in pos_text:
             return True
+
+    # Negative keywords: check first 3 rows (title + header + subheader).
+    # The _PANEL_HEADER_RE regex is smart enough to exclude fixture
+    # descriptions like "FLAT PANEL RECESSED" and "AT PANEL LED".
+    neg_text = " ".join(
+        " ".join(str(c) for c in row) for row in raw_table[:3]
+    ).lower()
 
     # Negative match: explicitly NOT a luminaire schedule
     for keyword in _NON_LUMINAIRE_TABLE_KEYWORDS:
-        if keyword in header_text:
+        if keyword in neg_text:
             return False
 
     # Negative match: regex-based panel header detection
     # Catches "PANEL A", "PANEL B", "PANEL LP-1", etc.
-    if _PANEL_HEADER_RE.search(header_text):
+    if _PANEL_HEADER_RE.search(neg_text):
         return False
 
     # Ambiguous: allow through (parser will try to find fixture columns)
@@ -419,6 +449,203 @@ def _looks_like_panel_schedule(fixtures: list[FixtureRecord]) -> bool:
     )
     ratio = numeric_count / len(fixtures)
     return ratio >= 0.6
+
+
+def _parse_headerless_schedule(
+    raw_table: list[list[str]],
+    source_page: str = "",
+) -> list[FixtureRecord]:
+    """Parse a schedule table that has no standard column headers.
+
+    Some small fixture schedules have a title row (e.g. "LIGHT FIXTURE
+    SCHEDULE") followed by notes and data rows, but no explicit column
+    headers like TYPE, DESCRIPTION, VOLTAGE, etc.  This function scans
+    each row for a fixture-code-like first cell and maps the remaining
+    cells to FixtureRecord fields by content heuristics.
+
+    Returns a list of FixtureRecord objects, or an empty list.
+    """
+    # Guard: reject tables with garbled/reversed text (custom font encoding).
+    # Concatenate all cell text and check for recognizable schedule keywords.
+    # Real fixture schedules contain at least some of these words.
+    all_text = " ".join(
+        str(c) for row in raw_table for c in row if c
+    ).lower()
+    _SCHEDULE_SANITY_WORDS = {
+        "led", "fixture", "luminaire", "lamp", "lumen", "watt",
+        "volt", "dimm", "recessed", "surface", "pendant", "mount",
+        "ceiling", "wall", "fluorescent", "light", "troffer",
+        "downlight", "schedule", "description", "type",
+    }
+    found_words = sum(1 for w in _SCHEDULE_SANITY_WORDS if w in all_text)
+    if found_words < 2:
+        logger.debug(
+            "Headerless fallback: table text on %s has only %d schedule "
+            "keywords (need ≥2) — skipping (likely garbled text)",
+            source_page or "unknown", found_words,
+        )
+        return []
+
+    fixtures: list[FixtureRecord] = []
+
+    for row in raw_table:
+        if not row or not row[0]:
+            continue
+        cell0 = row[0].strip()
+        if not cell0:
+            continue
+
+        # Extract fixture code from cell 0.
+        # Handle merged "code quantity" patterns like "F1 1" → code "F1".
+        code = _extract_code_from_cell(cell0)
+        if not code:
+            continue
+
+        # Pure-alpha codes >3 chars are headers, not fixture codes.
+        if code.isalpha() and len(code) > 3:
+            continue
+
+        # Must have at least one more non-empty cell (description etc.)
+        non_empty = [c.strip() for c in row[1:] if c and c.strip()]
+        if not non_empty:
+            continue
+
+        # Map remaining cells to fixture fields by content analysis.
+        fields = _map_cells_by_content(row[1:])
+        fixture = FixtureRecord(
+            code=code,
+            description=fields.get("description", ""),
+            fixture_style=fields.get("fixture_style", ""),
+            voltage=fields.get("voltage", ""),
+            mounting=fields.get("mounting", ""),
+            lumens=fields.get("lumens", ""),
+            cct=fields.get("cct", ""),
+            dimming=fields.get("dimming", ""),
+            max_va=fields.get("max_va", ""),
+        )
+        fixtures.append(fixture)
+        logger.info(
+            "Headerless fallback: extracted fixture %s from %s",
+            code, source_page or "unknown",
+        )
+
+    return fixtures
+
+
+# Regex patterns for content-based cell classification.
+_VOLTAGE_RE = re.compile(
+    r"(?:^|\b)(?:120|277|120/277|347|480|347/600|universal|univ)(?:\b|$)",
+    re.IGNORECASE,
+)
+_CCT_RE = re.compile(
+    r"(?:\b\d{4}\s*K\b|\b(?:30|35|40|50)00\s*(?:K|LED)\b)", re.IGNORECASE,
+)
+_MOUNTING_RE = re.compile(
+    r"\b(?:recessed|surface|pendant|wall|ceiling|lay[- ]?in|grid|stem"
+    r"|chain|track|pole|bracket|flush)\b",
+    re.IGNORECASE,
+)
+_LUMENS_RE = re.compile(
+    r"\b(?:lumen|lum|lumens)\b|\b\d+\s*(?:lm|LM)\b", re.IGNORECASE,
+)
+_DIMMING_RE = re.compile(
+    r"\b(?:dimm|0-10\s*V|DALI|ELV|triac|non[- ]?dim|lutron)\b",
+    re.IGNORECASE,
+)
+_WATTS_RE = re.compile(
+    r"\b\d+\s*(?:VA|W|watts?|watt)\b", re.IGNORECASE,
+)
+
+
+def _extract_code_from_cell(cell: str) -> str:
+    """Extract a fixture code from a cell that may contain merged data.
+
+    Handles patterns like:
+      "F1 1"  → "F1"  (code + quantity)
+      "F1"    → "F1"
+      "AL1 2" → "AL1"
+    """
+    cell = cell.strip()
+    if not cell:
+        return ""
+    # If the entire cell is a short alphanumeric code, use it directly.
+    if re.match(r"^[A-Za-z][A-Za-z0-9.\-/]{0,9}$", cell):
+        return cell
+    # Try splitting on whitespace — first token might be the code.
+    parts = cell.split()
+    if len(parts) >= 2:
+        candidate = parts[0]
+        # Check if candidate looks like a fixture code and the rest is numeric
+        # (quantity) or other data.
+        if re.match(r"^[A-Za-z][A-Za-z0-9.\-/]{0,9}$", candidate):
+            # Remaining parts should be short (quantity, note marker, etc.)
+            remainder = " ".join(parts[1:])
+            if len(remainder) <= 5 or remainder.isdigit():
+                return candidate
+    return ""
+
+
+def _map_cells_by_content(cells: list[str]) -> dict[str, str]:
+    """Map cells to fixture fields using content-based heuristics.
+
+    For headerless tables, we determine what each cell contains by
+    checking for voltage patterns, CCT patterns, etc.  The first long
+    text cell is treated as the description.
+    """
+    fields: dict[str, str] = {}
+    used: set[int] = set()
+
+    clean = [(i, c.strip()) for i, c in enumerate(cells) if c and c.strip()]
+
+    # Pass 1: identify cells by strong content patterns.
+    for i, text in clean:
+        if i in used:
+            continue
+        text_lower = text.lower()
+        if _CCT_RE.search(text) and "cct" not in fields:
+            fields["cct"] = text
+            used.add(i)
+        elif _VOLTAGE_RE.search(text) and "voltage" not in fields:
+            # Make sure it's not a long description that happens to mention voltage
+            if len(text) < 20:
+                fields["voltage"] = text
+                used.add(i)
+        elif _DIMMING_RE.search(text) and "dimming" not in fields:
+            fields["dimming"] = text
+            used.add(i)
+        elif _LUMENS_RE.search(text) and "lumens" not in fields:
+            fields["lumens"] = text
+            used.add(i)
+        elif _MOUNTING_RE.search(text) and "mounting" not in fields:
+            if len(text) < 30:
+                fields["mounting"] = text
+                used.add(i)
+        elif _WATTS_RE.search(text) and "max_va" not in fields:
+            if len(text) < 15:
+                fields["max_va"] = text
+                used.add(i)
+
+    # Pass 2: the longest remaining cell is likely the description.
+    remaining = [(i, text) for i, text in clean if i not in used]
+    if remaining:
+        # Sort by length descending — longest is description.
+        remaining.sort(key=lambda x: len(x[1]), reverse=True)
+        desc_i, desc_text = remaining[0]
+        if len(desc_text) > 10:
+            fields["description"] = desc_text
+            used.add(desc_i)
+
+    # Pass 3: if there's a catalog-number-like cell, use it as fixture_style.
+    for i, text in clean:
+        if i in used:
+            continue
+        # Catalog numbers often have dashes, slashes, and mixed case: "RMCA-4-FL/TR-..."
+        if len(text) > 5 and re.search(r"[-/]", text) and not text[0].isdigit():
+            fields["fixture_style"] = text
+            used.add(i)
+            break
+
+    return fields
 
 
 def parse_schedule_table(
@@ -450,6 +677,13 @@ def parse_schedule_table(
     try:
         header_idx, col_map = _find_header_row(raw_table)
     except ScheduleExtractionError:
+        # Fallback for headerless schedule tables: some small tables have
+        # a title row ("LIGHT FIXTURE SCHEDULE") followed by notes and
+        # data rows but no explicit column headers (TYPE, DESCRIPTION, etc.).
+        # Try to extract fixture codes directly from data rows.
+        fallback = _parse_headerless_schedule(raw_table, source_page)
+        if fallback:
+            return fallback
         logger.debug(
             "No valid header row found in table on %s — skipping table",
             source_page or "unknown page",

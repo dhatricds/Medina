@@ -3,14 +3,21 @@
 Like the estimator reading the luminaire schedule table, creating
 inventory entries with specs (code, description, voltage, etc.).
 
+Strategy: pdfplumber-first (accurate text extraction), VLM-fallback
+(handles non-standard formats, rasterized PDFs).  VLM is tried on
+any schedule page where pdfplumber finds 0 valid fixtures.
+
 Usage:
     uv run python -m medina.team.run_schedule <source> <work_dir>
 """
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -22,13 +29,12 @@ logging.basicConfig(
 logger = logging.getLogger("medina.team.schedule")
 
 
-import re
-
 # Header words that should never be treated as fixture codes.
 _HEADER_WORDS = frozenset({
     "SCHEDULE", "SCHEDULES", "LUMINAIRE", "FIXTURE", "FIXTURES",
     "LIGHTING", "TYPE", "DESCRIPTION", "MARK", "SYMBOL", "CATALOG",
     "MOUNTING", "VOLTAGE", "DIMMING", "WATTS", "WATTAGE",
+    "NO", "NO.", "#", "QTY", "QUANTITY", "CKT", "CIRCUIT",
 })
 
 
@@ -46,10 +52,98 @@ def _is_valid_fixture_code(code: str) -> bool:
     return True
 
 
+_MAX_VLM_PIXEL = 8000  # Max dimension for VLM APIs
+
+
+def _render_for_vlm(
+    source_path: Path,
+    pdf_page_index: int,
+    config,
+    source_key: str = "",
+    project_id: str = "",
+) -> tuple[bytes, int]:
+    """Render a page image sized for VLM API limits.
+
+    Returns (image_bytes, actual_dpi).
+    """
+    from medina.pdf.renderer import render_page_to_image
+    from PIL import Image
+
+    sched_render_dpi = 200
+    try:
+        from medina.runtime_params import get_param
+        sched_render_dpi = get_param(
+            "schedule_render_dpi", source_key=source_key, project_id=project_id,
+        )
+    except Exception:
+        pass
+    dpi = min(config.render_dpi, sched_render_dpi)
+
+    img_bytes = render_page_to_image(source_path, pdf_page_index, dpi=dpi)
+    b64_size = len(base64.b64encode(img_bytes))
+    img = Image.open(io.BytesIO(img_bytes))
+    max_dim = max(img.size)
+
+    while (b64_size > 5_000_000 or max_dim > _MAX_VLM_PIXEL) and dpi > 72:
+        dpi = max(72, dpi - 20)
+        img_bytes = render_page_to_image(source_path, pdf_page_index, dpi=dpi)
+        b64_size = len(base64.b64encode(img_bytes))
+        img = Image.open(io.BytesIO(img_bytes))
+        max_dim = max(img.size)
+
+    return img_bytes, dpi
+
+
+def _try_vlm_extraction(
+    page,
+    pdf_pages: dict,
+    config,
+    found_plan_codes: set[str],
+    source_key: str = "",
+    project_id: str = "",
+) -> list:
+    """Try VLM extraction on a single page. Returns list of fixtures or []."""
+    from medina.schedule.vlm_extractor import extract_schedule_vlm
+
+    spdf = pdf_pages.get(page.page_number)
+    if spdf is None:
+        return []
+
+    label = page.sheet_code or str(page.page_number)
+    try:
+        img_bytes, actual_dpi = _render_for_vlm(
+            page.source_path, page.pdf_page_index,
+            config, source_key, project_id,
+        )
+        from PIL import Image
+        img = Image.open(io.BytesIO(img_bytes))
+        b64_size = len(base64.b64encode(img_bytes))
+        logger.info(
+            "[SCHEDULE] VLM render: %s at %d DPI, %dx%d px, %.1f MB",
+            label, actual_dpi, img.size[0], img.size[1],
+            b64_size / 1_000_000,
+        )
+        vlm_fixtures = extract_schedule_vlm(
+            page, img_bytes, config,
+            plan_codes_hint=(
+                found_plan_codes if found_plan_codes else None
+            ),
+        )
+        if vlm_fixtures:
+            logger.info(
+                "[SCHEDULE] VLM extracted %d fixtures from %s: %s",
+                len(vlm_fixtures), label,
+                [f.code for f in vlm_fixtures],
+            )
+        return vlm_fixtures
+    except Exception as e:
+        logger.warning("[SCHEDULE] VLM failed for %s: %s", label, e)
+        return []
+
+
 def run(source: str, work_dir: str, hints=None, source_key: str = "", project_id: str = "") -> dict:
     """Run stage 4: SCHEDULE EXTRACTION."""
     from medina.pdf.loader import load
-    from medina.pdf.classifier import classify_pages
     from medina.schedule.parser import parse_all_schedules
     from medina.models import PageInfo, PageType, SheetIndexEntry
     from medina.config import get_config
@@ -68,9 +162,6 @@ def run(source: str, work_dir: str, hints=None, source_key: str = "", project_id
     # Use page classifications from search_result.json (preserves VLM
     # fallback classifications that text-based re-classification would lose).
     pages = [PageInfo.model_validate(p) for p in search_data["pages"]]
-    sheet_index = [
-        SheetIndexEntry.model_validate(e) for e in search_data["sheet_index"]
-    ]
 
     # Build a map from page_number to the search-agent's classification.
     search_type_map: dict[int, PageType] = {
@@ -96,23 +187,9 @@ def run(source: str, work_dir: str, hints=None, source_key: str = "", project_id
         [p.sheet_code for p in schedule_pages],
     )
 
-    # --- Stage 4: Text-based schedule extraction ---
-    fixtures = []
-    if schedule_pages:
-        fixtures = parse_all_schedules(schedule_pages, pdf_pages)
+    config = get_config()
 
-    # Combo page: also check plan pages for embedded schedule tables
-    if plan_pages:
-        combo_fixtures = parse_all_schedules(plan_pages, pdf_pages)
-        if combo_fixtures:
-            logger.info(
-                "[SCHEDULE] Found %d fixture type(s) on plan page(s) "
-                "(combo page)",
-                len(combo_fixtures),
-            )
-            fixtures.extend(combo_fixtures)
-
-    # Extract fixture codes from plan pages (for VLM cross-reference)
+    # ── Step 1: Extract fixture codes from plan pages (for cross-reference) ──
     found_plan_codes: set[str] = set()
     if plan_pages:
         from medina.schedule.vlm_extractor import extract_plan_fixture_codes
@@ -129,7 +206,29 @@ def run(source: str, work_dir: str, hints=None, source_key: str = "", project_id
                 sorted(found_plan_codes),
             )
 
-    # --- Filter out invalid fixture codes (table headers, etc.) ---
+    # ── Step 2: pdfplumber extraction (primary — accurate text) ──
+    fixtures = []
+    if schedule_pages:
+        fixtures = parse_all_schedules(schedule_pages, pdf_pages)
+        if fixtures:
+            logger.info(
+                "[SCHEDULE] pdfplumber extracted %d fixtures: %s",
+                len(fixtures),
+                [f.code for f in fixtures],
+            )
+
+    # Combo page: also check plan pages for embedded schedule tables
+    if plan_pages:
+        combo_fixtures = parse_all_schedules(plan_pages, pdf_pages)
+        if combo_fixtures:
+            logger.info(
+                "[SCHEDULE] Found %d fixture type(s) on plan page(s) "
+                "(combo page)",
+                len(combo_fixtures),
+            )
+            fixtures.extend(combo_fixtures)
+
+    # ── Step 3: Filter invalid fixture codes ──
     before_filter = len(fixtures)
     fixtures = [f for f in fixtures if _is_valid_fixture_code(f.code)]
     if before_filter > len(fixtures):
@@ -138,193 +237,70 @@ def run(source: str, work_dir: str, hints=None, source_key: str = "", project_id
             before_filter - len(fixtures),
         )
 
-    # --- Identify luminaire schedule pages ---
-    # When multiple schedule pages exist, use VLM to pre-screen which ones
-    # contain luminaire/fixture schedules vs panel/motor/other schedules.
-    # This screening is shared by both the OCR and VLM fallback paths.
-    # IMPORTANT: Only run OCR/VLM fallback on actual schedule pages, NOT
-    # plan pages.  Plan pages are handled by the combo-page pdfplumber
-    # path above.  Running OCR on plan pages produces garbage fixtures.
-    config = get_config()
-    all_candidates = list(schedule_pages)  # only schedule pages for OCR/VLM
-    luminaire_candidates = list(all_candidates)  # default: try all
+    # ── Step 4: VLM fallback when pdfplumber found 0 ──
+    # Also pre-screen schedule pages to identify luminaire vs panel schedule.
+    # Include plan pages as VLM candidates when they have embedded schedule
+    # tables that pdfplumber couldn't parse (combo pages).
+    vlm_candidate_pages = list(schedule_pages)
+    if not fixtures and plan_pages and config.has_vlm_key:
+        # Plan pages with embedded schedule tables are VLM candidates too
+        vlm_candidate_pages.extend(plan_pages)
+    if not fixtures and vlm_candidate_pages and config.has_vlm_key:
+        luminaire_candidates = list(vlm_candidate_pages)
 
-    if not fixtures and len(all_candidates) > 1 and config.has_vlm_key:
-        from medina.schedule.vlm_extractor import check_schedule_type_vlm
-        from medina.pdf.renderer import render_page_to_image
-        import base64
+        # Pre-screen when multiple schedule pages exist
+        if len(vlm_candidate_pages) > 1:
+            from medina.schedule.vlm_extractor import check_schedule_type_vlm
+            from medina.pdf.renderer import render_page_to_image
 
-        screened: list = []
-        for spage in all_candidates:
-            spdf = pdf_pages.get(spage.page_number)
-            if spdf is None:
-                continue
-            label = spage.sheet_code or str(spage.page_number)
-            try:
-                screen_img = render_page_to_image(
-                    spage.source_path, spage.pdf_page_index, dpi=100,
-                )
-                stype = check_schedule_type_vlm(spage, screen_img, config)
-                if stype in ("luminaire", "mixed", "unknown"):
+            screened: list = []
+            for spage in vlm_candidate_pages:
+                spdf = pdf_pages.get(spage.page_number)
+                if spdf is None:
+                    continue
+                label = spage.sheet_code or str(spage.page_number)
+                try:
+                    screen_img = render_page_to_image(
+                        spage.source_path, spage.pdf_page_index, dpi=100,
+                    )
+                    stype = check_schedule_type_vlm(spage, screen_img, config)
+                    if stype in ("luminaire", "mixed", "unknown"):
+                        screened.append(spage)
+                    else:
+                        logger.info(
+                            "[SCHEDULE] Skipping %s — VLM identified as %s schedule",
+                            label, stype,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "[SCHEDULE] Pre-screen failed for %s: %s — keeping it",
+                        label, e,
+                    )
                     screened.append(spage)
-                else:
-                    logger.info(
-                        "[SCHEDULE] Skipping %s — VLM identified as %s schedule",
-                        label, stype,
-                    )
-            except Exception as e:
-                logger.warning("[SCHEDULE] Pre-screen failed for %s: %s — keeping it", label, e)
-                screened.append(spage)
-        if screened:
-            luminaire_candidates = screened
-            logger.info(
-                "[SCHEDULE] VLM pre-screen kept %d of %d schedule pages: %s",
-                len(screened), len(all_candidates),
-                [p.sheet_code for p in screened],
-            )
+            if screened:
+                luminaire_candidates = screened
 
-    # --- OCR fallback when pdfplumber extracted 0 valid fixtures ---
-    # Try OCR before VLM — OCR reads fixture codes more accurately on
-    # rasterized pages and doesn't require an API key.
-    if not fixtures and luminaire_candidates:
-        from medina.schedule.ocr_extractor import extract_schedule_ocr
-        from medina.pdf.renderer import render_page_to_image
-
+        # Try VLM on each candidate
         for spage in luminaire_candidates:
-            spdf = pdf_pages.get(spage.page_number)
-            if spdf is None:
-                continue
             label = spage.sheet_code or str(spage.page_number)
             logger.info(
-                "[SCHEDULE] pdfplumber found 0 fixtures — trying OCR on %s",
-                label,
+                "[SCHEDULE] pdfplumber found 0 — trying VLM on %s", label,
             )
-            try:
-                ocr_dpi = 300
-                try:
-                    from medina.runtime_params import get_param
-                    ocr_dpi = get_param("schedule_render_dpi", source_key=source_key, project_id=project_id)
-                    ocr_dpi = max(ocr_dpi, 300)  # OCR needs higher DPI than VLM
-                except Exception:
-                    pass
-                img_bytes = render_page_to_image(
-                    spage.source_path, spage.pdf_page_index, dpi=ocr_dpi,
-                )
-                ocr_fixtures = extract_schedule_ocr(spage, img_bytes)
-                if ocr_fixtures:
-                    fixtures.extend(ocr_fixtures)
-                    logger.info(
-                        "[SCHEDULE] OCR extracted %d fixtures from %s: %s",
-                        len(ocr_fixtures), label,
-                        [f.code for f in ocr_fixtures],
-                    )
-            except Exception as e:
-                logger.warning("[SCHEDULE] OCR failed for %s: %s", label, e)
-
-        # Filter OCR results through the same validity check.
-        if fixtures:
-            before_filter = len(fixtures)
-            fixtures = [f for f in fixtures if _is_valid_fixture_code(f.code)]
-            if before_filter > len(fixtures):
-                logger.info(
-                    "[SCHEDULE] Filtered out %d invalid OCR fixture code(s)",
-                    before_filter - len(fixtures),
-                )
-
-        # Validate OCR results against plan-page codes.  If NONE of the
-        # OCR fixture codes match any code found on plan pages, the OCR
-        # likely read garbage (e.g., panel schedule circuit descriptions).
-        # Discard and let VLM try instead.
-        if fixtures and found_plan_codes:
-            ocr_codes = {f.code.upper() for f in fixtures}
-            plan_upper = {c.upper() for c in found_plan_codes}
-            overlap = ocr_codes & plan_upper
-            if not overlap:
-                logger.warning(
-                    "[SCHEDULE] OCR codes %s have NO overlap with plan codes %s "
-                    "— discarding OCR results (likely panel schedule garbage)",
-                    sorted(ocr_codes), sorted(plan_upper),
-                )
-                fixtures = []
-
-    # --- VLM fallback when both pdfplumber and OCR found 0 fixtures ---
-    vlm_candidates = luminaire_candidates
-
-    if not fixtures and vlm_candidates and config.has_vlm_key:
-        from medina.schedule.vlm_extractor import (
-            extract_schedule_vlm,
-        )
-        from medina.pdf.renderer import render_page_to_image
-        import base64
-
-        for spage in vlm_candidates:
-            spdf = pdf_pages.get(spage.page_number)
-            if spdf is None:
-                continue
-
-            label = spage.sheet_code or str(spage.page_number)
-            logger.info(
-                "[SCHEDULE] pdfplumber found 0 fixtures on %s — "
-                "trying VLM fallback",
-                label,
+            vlm_fixtures = _try_vlm_extraction(
+                spage, pdf_pages, config, found_plan_codes,
+                source_key, project_id,
             )
-            try:
-                from PIL import Image
-                import io
+            fixtures.extend(vlm_fixtures)
 
-                _MAX_VLM_PIXEL = 8000  # Claude Vision API max dimension
-
-                sched_render_dpi = 200
-                try:
-                    from medina.runtime_params import get_param
-                    sched_render_dpi = get_param("schedule_render_dpi", source_key=source_key, project_id=project_id)
-                except Exception:
-                    pass
-                sched_dpi = min(config.render_dpi, sched_render_dpi)
-                img_bytes = render_page_to_image(
-                    spage.source_path, spage.pdf_page_index,
-                    dpi=sched_dpi,
-                )
-                b64_size = len(base64.b64encode(img_bytes))
-                img = Image.open(io.BytesIO(img_bytes))
-                max_dim = max(img.size)
-                while (b64_size > 5_000_000 or max_dim > _MAX_VLM_PIXEL) and sched_dpi > 72:
-                    sched_dpi = max(72, sched_dpi - 20)
-                    img_bytes = render_page_to_image(
-                        spage.source_path, spage.pdf_page_index,
-                        dpi=sched_dpi,
-                    )
-                    b64_size = len(base64.b64encode(img_bytes))
-                    img = Image.open(io.BytesIO(img_bytes))
-                    max_dim = max(img.size)
-                logger.info(
-                    "[SCHEDULE] VLM render: %s at %d DPI, %dx%d px, %.1f MB",
-                    label, sched_dpi, img.size[0], img.size[1],
-                    b64_size / 1_000_000,
-                )
-                vlm_fixtures = extract_schedule_vlm(
-                    spage, img_bytes, config,
-                    plan_codes_hint=(
-                        found_plan_codes if found_plan_codes else None
-                    ),
-                )
-                fixtures.extend(vlm_fixtures)
-                logger.info(
-                    "[SCHEDULE] VLM extracted %d fixtures from %s",
-                    len(vlm_fixtures),
-                    label,
-                )
-            except Exception as e:
-                logger.warning(
-                    "[SCHEDULE] VLM failed for %s: %s", label, e
-                )
-
-    # Cross-reference VLM codes against plan page text
+    # ── Step 5: Cross-reference against plan page codes ──
     if fixtures and found_plan_codes:
         from medina.schedule.vlm_extractor import crossref_vlm_codes
         fixtures = crossref_vlm_codes(fixtures, found_plan_codes)
 
-    # Deduplicate by code
+    # ── Step 6: Filter and deduplicate ──
+    # Filter again after cross-reference
+    fixtures = [f for f in fixtures if _is_valid_fixture_code(f.code)]
+
     seen: set[str] = set()
     deduped = []
     for f in fixtures:
@@ -333,7 +309,7 @@ def run(source: str, work_dir: str, hints=None, source_key: str = "", project_id
             deduped.append(f)
     fixtures = deduped
 
-    # --- Apply user feedback hints ---
+    # ── Step 7: Apply user feedback hints ──
     if hints is not None:
         # Remove user-flagged fixtures
         if hints.removed_codes:

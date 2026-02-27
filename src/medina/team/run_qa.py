@@ -92,15 +92,33 @@ def run(
         }
         fixture.total = sum(fixture.counts_per_plan.values())
 
+    # Merge keynotes with the same number across plans.  The keynote agent
+    # produces one KeyNote per plan page — if plans E1.1 and E1.2 both have
+    # keynote #1, there will be two KeyNote objects.  Merge them into one
+    # with combined counts_per_plan and the longest text.
+    merged_kn: dict[str, KeyNote] = {}
+    for keynote in all_keynotes:
+        key = str(keynote.number)
+        if key in merged_kn:
+            existing = merged_kn[key]
+            existing.counts_per_plan.update(keynote.counts_per_plan)
+            if len(keynote.text) > len(existing.text):
+                existing.text = keynote.text
+            existing.fixture_references = list(
+                set(existing.fixture_references) | set(keynote.fixture_references)
+            )
+        else:
+            merged_kn[key] = keynote
+    all_keynotes = list(merged_kn.values())
+
     # Sync keynote counts from all_keynote_counts (which may include
     # VLM-updated values) back into each keynote's counts_per_plan.
     for keynote in all_keynotes:
-        for plan_code in list(keynote.counts_per_plan):
-            if plan_code in all_keynote_counts:
-                keynote.counts_per_plan[plan_code] = (
-                    all_keynote_counts[plan_code]
-                    .get(str(keynote.number), 0)
-                )
+        kn_key = str(keynote.number)
+        for plan_code, plan_kn_counts in all_keynote_counts.items():
+            count = plan_kn_counts.get(kn_key, 0)
+            if count > 0 or plan_code in keynote.counts_per_plan:
+                keynote.counts_per_plan[plan_code] = count
         keynote.total = sum(keynote.counts_per_plan.values())
 
     # --- Build ExtractionResult ---

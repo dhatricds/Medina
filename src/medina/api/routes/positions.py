@@ -108,6 +108,31 @@ def _extract_positions_on_demand(
             except Exception as ke:
                 logger.warning("Keynote position extraction failed for %s: %s", sheet_code, ke)
 
+            # Fallback: if text-based extraction found no positions but we
+            # know keynote numbers from VLM/results, run geometric detection
+            # directly.  This handles garbled-text PDFs where the keynote
+            # TEXT section can't be parsed but the diamond shapes exist.
+            if not page_data["keynote_positions"] and keynote_numbers:
+                try:
+                    from medina.plans.keynotes import _count_keynote_occurrences
+                    geo_result = _count_keynote_occurrences(
+                        pdf_page, keynote_numbers,
+                        float(pdf_page.width), float(pdf_page.height),
+                        return_positions=True,
+                    )
+                    if isinstance(geo_result, tuple):
+                        _geo_counts, geo_positions = geo_result
+                        for num, pos_list in geo_positions.items():
+                            if pos_list:
+                                page_data["keynote_positions"][str(num)] = pos_list
+                    if page_data["keynote_positions"]:
+                        logger.info(
+                            "Geometric fallback found positions for %d keynotes on %s",
+                            len(page_data["keynote_positions"]), sheet_code,
+                        )
+                except Exception as ge:
+                    logger.warning("Geometric keynote fallback failed for %s: %s", sheet_code, ge)
+
         pdf.close()
 
         # Cache the result

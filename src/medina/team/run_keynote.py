@@ -84,11 +84,100 @@ def run(source: str, work_dir: str, source_key: str = "", project_id: str = "", 
         else:
             all_keynotes, all_keynote_counts = kn_result[0], kn_result[1]
 
+    # --- VLM full extraction when text found 0 keynotes entirely ---
+    # This handles garbled/image-based PDFs where text extraction
+    # can't even find keynote definitions.
+    # Only trigger when fixture codes exist (schedule was found) —
+    # otherwise these are likely power/demolition plans without
+    # lighting keynotes.
+    config = get_config()
+    if config.has_vlm_key and not all_keynotes and plan_pages and fixture_codes:
+        logger.info(
+            "[KEYNOTE] Text extraction found 0 keynotes — trying VLM "
+            "full extraction on %d plan page(s)",
+            len(plan_pages),
+        )
+        try:
+            from medina.pdf.renderer import render_page_to_image
+            from medina.plans.vision_keynote_counter import (
+                extract_and_count_keynotes_vlm,
+            )
+
+            vlm_dpi = min(config.render_dpi, 200)
+            for pinfo in plan_pages:
+                code = pinfo.sheet_code or str(pinfo.page_number)
+                try:
+                    img_bytes = render_page_to_image(
+                        pinfo.source_path, pinfo.pdf_page_index,
+                        dpi=vlm_dpi,
+                    )
+                    vlm_keynotes, vlm_counts = extract_and_count_keynotes_vlm(
+                        pinfo, img_bytes, config,
+                    )
+                    if vlm_keynotes:
+                        all_keynotes.extend(vlm_keynotes)
+                        all_keynote_counts[code] = vlm_counts
+                        logger.info(
+                            "[KEYNOTE] VLM found %d keynotes on %s",
+                            len(vlm_keynotes), code,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "[KEYNOTE] VLM full extraction failed for %s: %s",
+                        code, e,
+                    )
+        except ImportError:
+            logger.warning("[KEYNOTE] VLM keynote extractor not available")
+
+        # Backfill geometric positions for VLM-extracted keynotes.
+        # VLM gives us keynote text + counts but NOT positions.
+        # The diamond/hexagon shapes are vector geometry in the PDF,
+        # so geometric detection can locate them even when text is garbled.
+        if all_keynotes and not all_keynote_positions:
+            vlm_kn_numbers = list(dict.fromkeys(
+                str(kn.number) for kn in all_keynotes
+            ))
+            for pinfo in plan_pages:
+                code = pinfo.sheet_code or str(pinfo.page_number)
+                try:
+                    import pdfplumber as _plumber
+                    _pdf = _plumber.open(str(pinfo.source_path))
+                    _pg = _pdf.pages[pinfo.pdf_page_index]
+                    from medina.plans.keynotes import _count_keynote_occurrences
+                    geo_result = _count_keynote_occurrences(
+                        _pg, vlm_kn_numbers,
+                        float(_pg.width), float(_pg.height),
+                        return_positions=True,
+                        viewport_bbox=pinfo.viewport_bbox,
+                    )
+                    _pdf.close()
+                    if isinstance(geo_result, tuple):
+                        _geo_counts, geo_positions = geo_result
+                        kn_pos_data: dict[str, list[dict]] = {}
+                        for num, pos_list in geo_positions.items():
+                            if pos_list:
+                                kn_pos_data[str(num)] = pos_list
+                        if kn_pos_data:
+                            all_keynote_positions[code] = {
+                                "page_width": float(_pg.width),
+                                "page_height": float(_pg.height),
+                                "keynotes": kn_pos_data,
+                            }
+                            logger.info(
+                                "[KEYNOTE] Geometric backfill found positions "
+                                "for %d keynotes on %s",
+                                len(kn_pos_data), code,
+                            )
+                except Exception as e:
+                    logger.warning(
+                        "[KEYNOTE] Geometric position backfill failed for %s: %s",
+                        code, e,
+                    )
+
     # --- VLM fallback for plans with low keynote counts ---
     # Triggers when: (a) all counts are zero, or (b) total count is
     # suspiciously low relative to the number of keynotes defined on
     # that page (indicates geometric/text detection failed).
-    config = get_config()
     if config.has_vlm_key and all_keynotes:
         keynote_numbers = list(dict.fromkeys(
             str(kn.number) for kn in all_keynotes
@@ -103,19 +192,28 @@ def run(source: str, work_dir: str, source_key: str = "", project_id: str = "", 
                 n for n in page_counts if page_counts.get(n) is not None
             ]
             total = sum(page_counts.get(n, 0) for n in plan_kn_nums)
-            num_keynotes = len(plan_kn_nums) or len(keynote_numbers)
             max_single = max(page_counts.values()) if page_counts else 0
             # Trigger VLM if:
-            # (a) total count too low — each keynote should appear ≥1 on avg
+            # (a) geometric detection found ALL ZEROS for this plan —
+            #     indicates detection failure (scanned PDF, unusual shapes).
+            #     Note: we do NOT trigger VLM just because total < num_keynotes
+            #     — it's normal for only a few keynotes to appear on each plan
+            #     (especially in multi-viewport pages with shared keynote panels).
             # (b) any single keynote count suspiciously high — likely false
             #     positives from dense line pages (bare circuit numbers
             #     passing the geometric quadrant check)
-            if total < num_keynotes or max_single > max_plausible:
+            if total == 0 or max_single > max_plausible:
                 if max_single > max_plausible:
                     logger.info(
                         "[KEYNOTE] Plan %s: max keynote count=%d exceeds "
                         "threshold=%d — triggering VLM verification",
                         code, max_single, max_plausible,
+                    )
+                elif total == 0:
+                    logger.info(
+                        "[KEYNOTE] Plan %s: geometric detection found 0 "
+                        "keynote symbols — triggering VLM fallback",
+                        code,
                     )
                 plans_needing_vlm.append(pinfo)
 
@@ -141,10 +239,27 @@ def run(source: str, work_dir: str, source_key: str = "", project_id: str = "", 
                         vlm_counts = count_keynotes_vision(
                             pinfo, img_bytes, keynote_numbers, config,
                         )
-                        all_keynote_counts[code] = vlm_counts
+                        # Merge VLM counts with geometric counts:
+                        # - If geometric detection found a positive count
+                        #   AND positions, keep it (geometric is more reliable).
+                        # - Only use VLM count when geometric found 0 for
+                        #   that keynote on this plan.
+                        # This prevents VLM hallucinations from overriding
+                        # correct geometric results.
+                        geo_counts = all_keynote_counts.get(code, {})
+                        merged_counts = {}
+                        for kn_num in set(list(geo_counts.keys()) + list(vlm_counts.keys())):
+                            geo_val = geo_counts.get(kn_num, 0)
+                            vlm_val = vlm_counts.get(kn_num, 0)
+                            if geo_val > 0:
+                                # Trust geometric detection — it has positions
+                                merged_counts[kn_num] = geo_val
+                            else:
+                                merged_counts[kn_num] = vlm_val
+                        all_keynote_counts[code] = merged_counts
                         logger.info(
-                            "[KEYNOTE] VLM counts for %s: %s",
-                            code, vlm_counts,
+                            "[KEYNOTE] VLM counts for %s: %s (merged with geo: %s)",
+                            code, vlm_counts, geo_counts,
                         )
                     except Exception as e:
                         logger.warning(

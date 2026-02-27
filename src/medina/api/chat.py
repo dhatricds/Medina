@@ -5,7 +5,6 @@ detection, and memory-aware context building.
 """
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import re
@@ -42,10 +41,37 @@ class ChatResponse(BaseModel):
 
 INTENT_KEYWORDS = {
     "correction": [
-        "should be", "is wrong", "incorrect", "fix", "change", "correct",
-        "not right", "missing", "remove", "add fixture", "count should",
-        "actually", "overcounted", "undercounted", "too many", "too few",
-        "reprocess", "recount", "re-run", "redo", "run again",
+        "should be", "is wrong", "incorrect", "fix ", "fix it", "change to",
+        "correct ", "not right", "missing", "remove", "add fixture",
+        "count should", "actually", "overcounted", "undercounted",
+        "too many", "too few", "reprocess", "recount", "re-run",
+        "redo", "run again", "process only", "only process",
+        "not a lighting", "not lighting", "is a lighting",
+        "is lighting", "demolition", "skip page", "skip these",
+        "don't process", "do not process", "ignore page",
+        "we have to process", "need to process",
+        "subplan", "sub-plan", "sub plan", "viewport",
+        "find inventory", "find fixture", "find the inventory",
+        "embedded plan", "embedded lighting",
+        "process this", "count this", "count these", "count the",
+        "this is a", "this page is", "this page has",
+        "schedule is on", "schedule on page", "schedule on this",
+        "has a schedule", "has schedule", "has fixtures",
+        "look at", "check this", "check page",
+        "combo page", "combo", "both schedule and",
+        "reclassify", "classify as", "mark as",
+        "split this", "split page", "has two", "has multiple",
+        "is not a", "is not lighting", "not a schedule",
+        "these are", "those are", "that is",
+        "highlight", "show me where", "show position", "show marker",
+        "locate", "find on plan", "where is fixture", "where are",
+        "toggle is wrong", "markers are wrong", "positions are wrong",
+        "inventory is right", "inventory is wrong", "count is right",
+        "count is wrong", "toggle is right",
+        "not showing", "not displayed", "doesn't show", "does not show",
+        "can't see", "cannot see", "not visible", "not appearing",
+        "left panel", "leftpanel", "pdf viewer", "selected fixture",
+        "show the", "display the", "show fixture", "show inventory",
     ],
     "param_change": [
         "tolerance", "threshold", "dpi", "increase", "decrease", "set",
@@ -81,6 +107,13 @@ def _detect_intent(text: str) -> str:
         return "correction"
     if scores["param_change"] >= 1:
         return "param_change"
+
+    # Fallback: if user mentions a page/sheet code and uses imperative
+    # language, treat as correction (they're likely giving an instruction
+    # about that page).
+    if re.search(r"\b[Ee]\d+\.?\d*\b|\bpage\s+\d+\b|\bpg\s*\d+\b", lower):
+        return "correction"
+
     return "general"
 
 
@@ -168,94 +201,118 @@ def _render_referenced_pages(
 # ── System prompt ─────────────────────────────────────────────────────
 
 CHAT_SYSTEM_PROMPT = """\
-You are Medina, an AI assistant for electrical construction drawing analysis. \
-You help contractors review and correct lighting fixture inventory extractions.
+You are Medina, an AI assistant built into a web application for electrical \
+construction drawing analysis. You help contractors review and correct \
+lighting fixture inventory extractions from PDF blueprints.
 
-You can:
-1. **Answer questions** about the current project — fixtures, counts, pages, keynotes
-2. **Make corrections** — fix counts, add/remove fixtures, reclassify pages, update specs
-3. **Adjust parameters** — change pipeline settings like font tolerance, DPI, etc.
-4. **Explain** why certain decisions were made during extraction
+THE APPLICATION has three panels:
+- LEFT: PDF viewer showing blueprint pages (zoom, navigate)
+- CENTER: Agent pipeline status (5 agents: Search, Schedule, Count, Keynote, QA)
+- RIGHT: Fixture table and Keynote table with editable counts, plus this chat panel
 
-Context about the current project is provided below. Use it to give accurate, \
-specific answers.
+ONLY REFERENCE FEATURES THAT ACTUALLY EXIST in this app. \
+Do NOT mention features like "keynote layers", "blueprint viewer layers", \
+"zoom to keynote", "filter panels", "annotation tools", "highlight modes", \
+or any features not listed above.
 
-IMPORTANT: When the user mentions a specific page, you may receive an IMAGE of that \
-page. LOOK at the image carefully to understand what is on it — identify lighting \
-fixtures, schedule tables, keynotes, viewports, and page types. Use what you SEE \
-to make accurate corrections. If the page contains a lighting plan with fixture \
-symbols, classify it as lighting_plan. If it has multiple lighting viewports \
-(e.g., Level 1 and Mezzanine side by side), use split_page. If it has both a \
-plan and an embedded schedule table, classify as lighting_plan (schedule auto-detected).
+YOUR CAPABILITIES:
+1. Answer questions using the project data provided below
+2. Return JSON actions to correct counts, add/remove fixtures, reclassify pages, split pages
+3. Return JSON highlight instructions to show fixture/keynote positions on the PDF
+4. Return JSON param_changes to adjust pipeline settings
 
-When the user reports a COUNTING issue (fixture or keynote count wrong/missed/not properly counted):
-- Do NOT guess the correct count
-- Return a JSON highlight instruction to show detected positions on the blueprint
+UI / DISPLAY ISSUES:
+- When the user says the left panel is "not showing" fixtures, positions aren't visible, \
+or the selected fixture isn't highlighted: return a highlight JSON for the fixture/keynote \
+they're trying to see. This will navigate the PDF viewer and display marker overlays.
+- If the user mentions a specific fixture code, highlight that code.
+- If the user says "selected fixture" without specifying which one, ask which fixture code \
+and plan they want to see.
+- NEVER say "I don't have access to UI state" or "I cannot control the frontend." \
+You CAN control what the left panel shows by returning highlight JSON.
+
+CRITICAL: When the user TELLS you something about the project (e.g., "this page is a \
+lighting plan", "there are subplans here", "the schedule is on page 3", "process only \
+these pages", "count the fixtures on E103"), ALWAYS act on it by returning the \
+appropriate JSON action. The user is the expert — they know what's on their drawings. \
+NEVER dismiss user instructions with "I don't have that information." \
+Only say that when the user ASKS a question about data you genuinely don't have.
+
+RULES:
+- Be concise. Contractors are busy. 1-3 sentences max.
+- When answering questions, reference the project data below.
+- NEVER invent fixture codes, page numbers, or counts not in the context.
+- If page images are attached, LOOK at them to identify content.
+- When the user gives instructions or feedback, ALWAYS generate appropriate JSON actions.
+
+HIGHLIGHTING / SHOWING POSITIONS:
+- When user says "highlight", "show me", "where is", "locate", "find on plan", \
+"show positions", "show the markers" — return a highlight JSON.
+- This opens the PDF viewer to the plan page and shows marker overlays on each \
+detected position. Users can click markers to toggle them (accept/reject).
 - For fixtures: ```json\n{"highlight": {"fixture_code": "B2", "plan": "E601-L1"}}\n```
-- For keynotes: ```json\n{"highlight": {"keynote_number": "3", "plan": "E601-MEZ"}}\n```
-- Omit "plan" if user didn't specify — system shows first plan with count > 0
+- For keynotes: ```json\n{"highlight": {"keynote_number": "3", "plan": "E200"}}\n```
+- Omit "plan" if user didn't specify — it will highlight on the first available plan.
+- You can highlight multiple items by returning multiple highlight objects.
+
+COUNTING ISSUES (fixture or keynote count wrong/missed):
+- Do NOT guess counts. Return a highlight JSON so user can verify visually.
+- After highlighting, the user can click markers to reject false positives or \
+add missed positions. The count auto-updates based on accepted markers.
+
+MARKER / TOGGLE ISSUES:
+- "toggle is wrong" / "markers are wrong" / "positions are wrong" = the highlighted \
+marker boxes on the plan are in incorrect positions (false detections).
+- "inventory is right but toggle is wrong" = the count in the table is correct \
+but the marker positions shown on the PDF don't match real fixture locations. \
+Return a highlight JSON so the user can click to reject wrong markers and add correct ones.
+- "inventory is wrong but toggle is right" / "count is wrong" = the markers are \
+in the right spots but the count doesn't match. Return a highlight JSON — after \
+the user adjusts markers, the count will update.
+- ALWAYS return a highlight JSON for these requests so the user can visually verify.
+
+STRUCTURAL CORRECTIONS (page not processed, wrong classification, which pages to include):
+- Return JSON actions block. Use fixture_code = page number or sheet code.
+- When user says "only process X, Y, Z" or "process only X, Y, Z": reclassify ALL other \
+lighting plan pages as "other". Generate one reclassify_page action per page to EXCLUDE. \
+Keep the named pages as lighting_plan. Example: if lighting_plans are [E101,E102,E103,E104] \
+and user says "only process E103, E104", return actions to reclassify E101 and E102 as "other".
+- When user says a page IS a lighting plan, reclassify it as lighting_plan.
+- When user says a page is NOT a lighting plan, reclassify it as "other".
 - Examples:
-  - "B2 was not properly counted" → {"highlight": {"fixture_code": "B2"}}
-  - "keynote 5 is wrong on E200" → {"highlight": {"keynote_number": "5", "plan": "E200"}}
+  - Page as lighting plan: ```json\n{"actions": [{"action": "reclassify_page", "fixture_code": "4", "fixture_data": {"page_type": "lighting_plan"}, "reason": "other"}]}\n```
+  - Page as schedule: ```json\n{"actions": [{"action": "reclassify_page", "fixture_code": "E501", "fixture_data": {"page_type": "schedule"}, "reason": "other"}]}\n```
+  - Exclude pages: ```json\n{"actions": [{"action": "reclassify_page", "fixture_code": "E101", "fixture_data": {"page_type": "other"}, "reason": "other"}, {"action": "reclassify_page", "fixture_code": "E102", "fixture_data": {"page_type": "other"}, "reason": "other"}]}\n```
+  - Split multi-viewport page: ```json\n{"actions": [{"action": "split_page", "fixture_code": "E601", "fixture_data": {"viewports": [{"label": "L1"}, {"label": "MEZ"}]}, "reason": "other"}]}\n```
+- SUBPLANS / VIEWPORTS: When user mentions "subplans", "sub-plans", "viewports", "find inventory \
+in subplans", or "embedded lighting plans": LOOK at the attached page image. Identify lighting \
+plan viewports by their title labels (e.g., "MAIN LEVEL LIGHTING PLAN - AREA 'B'"). \
+Return a split_page action with the lighting viewport labels. If the page is currently classified \
+as "schedule" or "other", ALSO include a reclassify_page action to change it to "lighting_plan" \
+so the schedule table is still extracted AND fixture counting runs on the subplans. Example for \
+a combo page with 2 lighting viewports:
+```json
+{"actions": [{"action": "reclassify_page", "fixture_code": "E1.11", "fixture_data": {"page_type": "lighting_plan"}, "reason": "other"}, {"action": "split_page", "fixture_code": "E1.11", "fixture_data": {"viewports": [{"label": "AB"}, {"label": "AC"}]}, "reason": "other"}]}
+```
+- IMPORTANT: Always identify the viewport labels from the page image. Labels like "AREA B" → "AB", \
+"AREA C" → "AC", "LEVEL 1" → "L1", "MEZZANINE" → "MEZ".
 
-When the user wants a STRUCTURAL CORRECTION (page not processed, wrong type):
-- Return a JSON block with structured actions. Wrap in ```json ... ```
-- Use fixture_code = page number (e.g., "4") or sheet code (e.g., "E501")
-- ALWAYS include fixture_data with page_type
-- If the page has BOTH a plan AND embedded schedule table, classify as lighting_plan \
-(the system auto-detects embedded schedule tables)
-- If the page has MULTIPLE lighting viewports, use split_page action instead
-- JSON examples:
-  - "page 4 has a lighting plan":
-    ```json
-    {"actions": [{"action": "reclassify_page", "fixture_code": "4", "fixture_data": {"page_type": "lighting_plan"}, "reason": "other"}]}
-    ```
-  - "E501 has a schedule table":
-    ```json
-    {"actions": [{"action": "reclassify_page", "fixture_code": "E501", "fixture_data": {"page_type": "schedule"}, "reason": "other"}]}
-    ```
-  - "E601 has Level 1 and Mezzanine plans":
-    ```json
-    {"actions": [{"action": "split_page", "fixture_code": "E601", "fixture_data": {"viewports": [{"label": "L1"}, {"label": "MEZ"}]}, "reason": "other"}]}
-    ```
-
-When NO PLANS were found and the user identifies pages to process:
-- Return multiple reclassify_page actions for all mentioned pages
-- Use page numbers as fixture_code values (e.g., "3", "4")
-- Ask which pages are plans and which are schedules if unclear
-
-When the user asks a QUESTION, answer directly from the project data and context.
-
-When the user wants a PARAMETER CHANGE, return a JSON block:
+PARAMETER CHANGES:
 ```json
 {"param_changes": [{"key": "font_size_tolerance_multi", "value": 0.6, "scope": "project_id"}]}
 ```
 
-For general conversation, respond naturally and helpfully.
+Available parameters: font_size_tolerance_multi (1.01-3.0), font_size_tolerance_single (1.01-2.0), \
+isolation_distance (5-50), dedup_distance (20-200), legend_col_x_frac (0.5-1.0), \
+title_block_frac (0.5-1.0), schedule_render_dpi (72-400), keynote_max_number (5-99), \
+max_plausible_keynote_count (3-50), qa_confidence_threshold (0.5-1.0), \
+use_vision_counting (bool), render_dpi (72-600).
 
-IMPORTANT: Be concise. Contractors are busy. Get to the point quickly.
+Action types: count_override, keynote_count_override (fixture_code="KN-{number}"), \
+add, remove, update_spec, reclassify_page, split_page.
 
-Available runtime parameters:
-- font_size_tolerance_multi (float, 1.01-3.0, default 1.5)
-- font_size_tolerance_single (float, 1.01-2.0, default 1.15)
-- isolation_distance (float, 5-50, default 15pt)
-- dedup_distance (float, 20-200, default 70pt)
-- legend_col_x_frac (float, 0.5-1.0, default 0.85)
-- title_block_frac (float, 0.5-1.0, default 0.80)
-- schedule_render_dpi (int, 72-400, default 200)
-- keynote_max_number (int, 5-99, default 20)
-- max_plausible_keynote_count (int, 3-50, default 10)
-- qa_confidence_threshold (float, 0.5-1.0, default 0.95)
-- use_vision_counting (bool, default false)
-- render_dpi (int, 72-600, default 300)
-
-Reason values for corrections: missed_embedded_schedule, wrong_fixture_code, \
-extra_fixture, missing_fixture, vlm_misread, wrong_bounding_box, manual_count_edit, other
-
-Action types for corrections: count_override, keynote_count_override \
-(use fixture_code="KN-{number}", fixture_data={keynote_number, sheet, corrected}), \
-add, remove, update_spec (for spec fields like description, voltage, mounting, \
-schedule_page, etc.), reclassify_page, split_page
+Reason values: missed_embedded_schedule, wrong_fixture_code, extra_fixture, \
+missing_fixture, vlm_misread, wrong_bounding_box, manual_count_edit, other.
 """
 
 
@@ -391,8 +448,6 @@ async def process_chat_message(
 
     Detects intent, builds context, calls LLM, and routes the response.
     """
-    import anthropic
-
     config = get_config()
 
     # ── Direct reprocess shortcut ─────────────────────────────────
@@ -481,17 +536,7 @@ async def process_chat_message(
     # Build context
     context = _build_chat_context(project_data, chat_history, memory_context)
 
-    # For simple questions that can be answered from data directly
-    if intent == "question" and not config.anthropic_api_key:
-        return ChatResponse(
-            message=ChatMessage(
-                role="assistant",
-                content="I can see the project data but need an API key for detailed answers.",
-                intent="question",
-            )
-        )
-
-    if not config.anthropic_api_key:
+    if not config.has_vlm_key:
         return ChatResponse(
             message=ChatMessage(
                 role="assistant",
@@ -500,48 +545,50 @@ async def process_chat_message(
             )
         )
 
-    # Call Claude
-    client = anthropic.Anthropic(api_key=config.anthropic_api_key)
-
-    messages = []
-    # Add chat history for context
-    for msg in chat_history[-6:]:
-        messages.append({
-            "role": msg["role"],
-            "content": msg["content"],
-        })
     # Detect page references — if the user mentions a page, render it
     # so the LLM can actually see what's on it.
     page_refs = _extract_page_references(user_text, project_data)
-    image_blocks: list[dict] = []
+    image_blocks_bytes: list[bytes] = []
+    image_labels: list[str] = []
     if page_refs and intent in ("correction", "general"):
-        image_blocks = _render_referenced_pages(page_refs, max_pages=2, dpi=150)
+        from medina.pdf.renderer import render_page_to_image
+        for ref in page_refs[:2]:
+            source_path = ref.get("source_path", "")
+            pdf_page_index = ref.get("pdf_page_index", 0)
+            if not source_path:
+                continue
+            try:
+                png_bytes = render_page_to_image(source_path, pdf_page_index, dpi=150)
+                image_blocks_bytes.append(png_bytes)
+                page_label = ref.get("sheet_code") or f"page {ref.get('page_number', '?')}"
+                image_labels.append(page_label)
+                logger.info("Rendered %s for chat VLM (%d KB)", page_label, len(png_bytes) // 1024)
+            except Exception as e:
+                logger.warning("Failed to render page for chat: %s", e)
 
-    # Add current message — include page images if available
-    if image_blocks:
-        user_content: list[dict] = [
-            {"type": "text", "text": f"Project context:\n{context}\n\nUser message:\n{user_text}"},
-        ] + image_blocks
-        messages.append({"role": "user", "content": user_content})
-    else:
-        messages.append({
-            "role": "user",
-            "content": f"Project context:\n{context}\n\nUser message:\n{user_text}",
-        })
+    # Build the prompt with context and page image labels
+    full_prompt = f"System instructions:\n{CHAT_SYSTEM_PROMPT}\n\n"
+
+    # Add chat history
+    for msg in chat_history[-6:]:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        full_prompt += f"{role}: {content}\n"
+
+    full_prompt += f"\nProject context:\n{context}\n\nUser message:\n{user_text}"
+
+    if image_labels:
+        full_prompt += f"\n\n[Page images attached: {', '.join(image_labels)}]"
 
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1024,
-            system=CHAT_SYSTEM_PROMPT,
-            messages=messages,
-        )
+        from medina.vlm_client import get_vlm_client
+        vlm = get_vlm_client(config)
 
-        # Extract text
-        text = ""
-        for block in response.content:
-            if hasattr(block, "text"):
-                text += block.text
+        text = vlm.vision_query(
+            images=image_blocks_bytes,
+            prompt=full_prompt,
+            max_tokens=1024,
+        )
 
         # Parse response for structured actions
         actions = None
@@ -549,12 +596,23 @@ async def process_chat_message(
         param_changes = None
         highlight = None
 
+        json_str = ""
         if "```json" in text:
             try:
                 json_start = text.index("```json") + 7
                 json_end = text.index("```", json_start)
                 json_str = text[json_start:json_end].strip()
-                parsed = json.loads(json_str)
+                # LLM may return multiple JSON objects separated by
+                # newlines (one per item).  Parse only the first.
+                try:
+                    parsed = json.loads(json_str)
+                except json.JSONDecodeError:
+                    # Try first line only (handles multi-object blocks)
+                    first_line = json_str.split("\n")[0].strip()
+                    if first_line:
+                        parsed = json.loads(first_line)
+                    else:
+                        raise
 
                 if "highlight" in parsed:
                     # Highlight instruction — immediate, no confirmation

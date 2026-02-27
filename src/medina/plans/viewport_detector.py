@@ -47,7 +47,7 @@ _LABEL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(roof|rooftop)", re.IGNORECASE), "RF"),
     (re.compile(r"(penthouse|penth)", re.IGNORECASE), "PH"),
     (re.compile(r"(garage|parking)", re.IGNORECASE), "GAR"),
-    (re.compile(r"area\s+([A-Z0-9]+)", re.IGNORECASE), "A{0}"),
+    (re.compile(r"area\s+['\"]?([A-Z0-9]+)['\"]?", re.IGNORECASE), "A{0}"),
 ]
 
 
@@ -140,68 +140,43 @@ def _split_line_by_x_gap(
     return segments
 
 
-def detect_viewports(
+def _scan_region_for_titles(
     pdf_page: Any,
-    page_info: PageInfo,
-    viewport_separation_threshold: float | None = None,
-) -> list[Viewport]:
-    """Detect multiple lighting viewports on a single page.
-
-    Looks for viewport titles in the bottom ~15% of the page. If 2+
-    lighting viewports are found, returns them with computed bounding
-    boxes. Otherwise returns an empty list (no splitting needed).
-
-    Args:
-        pdf_page: pdfplumber page object.
-        page_info: Page metadata.
-
-    Returns:
-        List of Viewport objects. Empty if ≤1 lighting viewport found.
-    """
-    width = pdf_page.width
-    height = pdf_page.height
-
-    # Viewport titles typically appear in the bottom 15% of the page,
-    # above the title block (which is in the rightmost ~25%).
-    # Exclude the rightmost 25% (title block area) to avoid false positives
-    # from the page title that repeats "LIGHTING PLAN" in the title block.
-    title_block_x = width * 0.75
-    title_region_bbox = (0, height * 0.82, title_block_x, height * 0.97)
+    region_bbox: tuple[float, float, float, float],
+    page_width: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Scan a region for viewport titles, returning lighting and non-lighting lists."""
     try:
-        cropped = pdf_page.within_bbox(title_region_bbox)
+        cropped = pdf_page.within_bbox(region_bbox)
         words = cropped.extract_words(x_tolerance=3, y_tolerance=3)
     except Exception:
-        return []
+        return [], []
 
     if not words:
-        return []
+        return [], []
 
-    # Group words into lines, then split each line at large x-gaps so
-    # that multiple viewport titles on the same y-line are separated.
     raw_lines = _group_title_lines(words)
     segments: list[list[dict[str, Any]]] = []
     for line_words in raw_lines:
-        segments.extend(_split_line_by_x_gap(line_words, width))
+        segments.extend(_split_line_by_x_gap(line_words, page_width))
 
     lighting_titles: list[dict[str, Any]] = []
     non_lighting_titles: list[dict[str, Any]] = []
 
     for seg_words in segments:
         seg_text = " ".join(w["text"] for w in seg_words)
-        # Must mention a lighting/power/systems plan to be a viewport title.
         is_lighting = bool(_LIGHTING_KEYWORDS.search(seg_text))
         is_non_lighting = bool(_NON_LIGHTING_KEYWORDS.search(seg_text))
 
         if not is_lighting and not is_non_lighting:
             continue
 
-        # Compute center x of this title segment.
         x_center = sum(
             (w["x0"] + w["x1"]) / 2 for w in seg_words
         ) / len(seg_words)
 
         # Offset y back to full-page coordinates.
-        y_center = title_region_bbox[1] + (
+        y_center = region_bbox[1] + (
             sum((w["top"] + w["bottom"]) / 2 for w in seg_words)
             / len(seg_words)
         )
@@ -219,6 +194,81 @@ def detect_viewports(
         else:
             non_lighting_titles.append(entry)
 
+    return lighting_titles, non_lighting_titles
+
+
+def detect_viewports(
+    pdf_page: Any,
+    page_info: PageInfo,
+    viewport_separation_threshold: float | None = None,
+) -> list[Viewport]:
+    """Detect multiple lighting viewports on a single page.
+
+    First scans the bottom ~15% (standard layout). If that finds <2
+    lighting viewports, falls back to a full-page scan to support grid
+    layouts where viewport titles appear in the middle of the page.
+
+    Args:
+        pdf_page: pdfplumber page object.
+        page_info: Page metadata.
+
+    Returns:
+        List of Viewport objects. Empty if ≤1 lighting viewport found.
+    """
+    width = pdf_page.width
+    height = pdf_page.height
+
+    # Viewport titles typically appear in the bottom 15% of the page,
+    # above the title block (which is in the rightmost ~25%).
+    # Exclude the rightmost 25% (title block area) to avoid false positives
+    # from the page title that repeats "LIGHTING PLAN" in the title block.
+    title_block_x = width * 0.75
+    title_region_bbox = (0, height * 0.82, title_block_x, height * 0.97)
+
+    lighting_titles, non_lighting_titles = _scan_region_for_titles(
+        pdf_page, title_region_bbox, width,
+    )
+
+    # Fallback: scan the full page (excluding title block column AND
+    # the rightmost notes column) for grid layouts where viewport titles
+    # appear anywhere on the page.  Use a tighter x cutoff (65% instead
+    # of 75%) to exclude general notes text that mentions "LIGHTING".
+    is_grid_layout = False
+    if len(lighting_titles) < 2:
+        notes_cutoff_x = width * 0.65
+        full_region = (0, 0, notes_cutoff_x, height)
+        full_lighting, full_non_lighting = _scan_region_for_titles(
+            pdf_page, full_region, width,
+        )
+        # Extra filter: in full-page mode, require viewport titles to have
+        # a structured format — they must contain a qualifier like
+        # "LEVEL", "FLOOR", "AREA", "ENLARGED", "PARTIAL" alongside the
+        # lighting keyword.  Bare "LIGHTING PLAN" matches in notes are
+        # rejected.
+        _VP_QUALIFIER = re.compile(
+            r"level|floor|area|enlarged|partial|basement|mezzanine|"
+            r"roof|penthouse|garage|upper|lower|main",
+            re.IGNORECASE,
+        )
+        full_lighting = [
+            t for t in full_lighting
+            if _VP_QUALIFIER.search(t["text"])
+        ]
+        full_non_lighting = [
+            t for t in full_non_lighting
+            if _VP_QUALIFIER.search(t["text"])
+        ]
+        if len(full_lighting) >= 2:
+            lighting_titles = full_lighting
+            non_lighting_titles = full_non_lighting
+            is_grid_layout = True
+            logger.debug(
+                "Bottom-15%% scan found %d viewport(s) — full-page scan "
+                "found %d lighting viewports on %s (grid layout)",
+                0, len(full_lighting),
+                page_info.sheet_code or f"page {page_info.page_number}",
+            )
+
     if len(lighting_titles) < 2:
         return []
 
@@ -226,26 +276,37 @@ def detect_viewports(
     lighting_titles.sort(key=lambda t: t["x_center"])
     non_lighting_titles.sort(key=lambda t: t["x_center"])
 
-    # Require minimum horizontal separation between viewport centers.
-    # With x-gap splitting, each segment is already a distinct title.
-    # This guard catches multi-line title wrapping where the same title
-    # appears on consecutive lines at nearly the same x position.
-    # 10% of page width is enough — on a 4-viewport page each viewport
-    # is ~25% wide so centers are ~18% apart (well above 10%).
+    # Require minimum separation between viewport centers (horizontal
+    # OR vertical).  This guard catches multi-line title wrapping where
+    # the same title appears on consecutive lines at nearly the same
+    # position.  For grid layouts, viewports may be vertically stacked
+    # at the same x-position, so check y-separation as well.
     sep_threshold = viewport_separation_threshold if viewport_separation_threshold is not None else 0.10
-    min_separation = width * sep_threshold
-    max_gap = 0.0
+    min_x_sep = width * sep_threshold
+    min_y_sep = height * sep_threshold
+    max_x_gap = 0.0
+    max_y_gap = 0.0
     for i in range(1, len(lighting_titles)):
-        gap = abs(lighting_titles[i]["x_center"] - lighting_titles[i - 1]["x_center"])
-        max_gap = max(max_gap, gap)
-    if max_gap < min_separation:
+        x_gap = abs(lighting_titles[i]["x_center"] - lighting_titles[i - 1]["x_center"])
+        y_gap = abs(lighting_titles[i]["y_center"] - lighting_titles[i - 1]["y_center"])
+        max_x_gap = max(max_x_gap, x_gap)
+        max_y_gap = max(max_y_gap, y_gap)
+    if max_x_gap < min_x_sep and max_y_gap < min_y_sep:
         logger.debug(
-            "Viewport titles too close together (max gap=%.0f < min=%.0f) "
-            "on %s — not splitting",
-            max_gap, min_separation,
+            "Viewport titles too close together (max x_gap=%.0f < %.0f, "
+            "max y_gap=%.0f < %.0f) on %s — not splitting",
+            max_x_gap, min_x_sep, max_y_gap, min_y_sep,
             page_info.sheet_code or f"page {page_info.page_number}",
         )
         return []
+
+    # For grid layouts, group titles by y-row and compute per-row
+    # bounding boxes (vertical splits per row, not full-page columns).
+    if is_grid_layout:
+        return _build_grid_viewports(
+            lighting_titles, non_lighting_titles, width, height,
+            page_info,
+        )
 
     # Calculate viewport boundaries as midpoints between adjacent titles.
     # For the rightmost lighting viewport, use the midpoint to the first
@@ -284,6 +345,117 @@ def detect_viewports(
         page_info.sheet_code or f"page {page_info.page_number}",
         [(v.label, f"x={v.bbox[0]:.0f}-{v.bbox[2]:.0f}") for v in viewports],
     )
+
+    return viewports
+
+
+def _build_grid_viewports(
+    lighting_titles: list[dict[str, Any]],
+    non_lighting_titles: list[dict[str, Any]],
+    width: float,
+    height: float,
+    page_info: PageInfo,
+) -> list[Viewport]:
+    """Build viewports for grid layouts with multiple rows of viewports.
+
+    Groups titles by y-row and creates a 2D bounding box for each
+    lighting viewport (x boundaries from column position, y boundaries
+    from row position).
+    """
+    all_titles = lighting_titles + non_lighting_titles
+
+    # Group titles by y-row (cluster by y_center with tolerance)
+    y_tolerance = height * 0.03  # 3% of page height
+    all_titles_sorted = sorted(all_titles, key=lambda t: t["y_center"])
+
+    rows: list[list[dict[str, Any]]] = []
+    current_row: list[dict[str, Any]] = [all_titles_sorted[0]]
+    for t in all_titles_sorted[1:]:
+        if abs(t["y_center"] - current_row[-1]["y_center"]) <= y_tolerance:
+            current_row.append(t)
+        else:
+            rows.append(current_row)
+            current_row = [t]
+    rows.append(current_row)
+
+    if len(rows) < 1:
+        return []
+
+    # Compute y boundaries between rows
+    row_y_centers = [
+        sum(t["y_center"] for t in row) / len(row) for row in rows
+    ]
+
+    viewports: list[Viewport] = []
+
+    for row_idx, row_titles in enumerate(rows):
+        # Y boundaries: from midpoint with previous row to midpoint with next row
+        if row_idx == 0:
+            y0 = 0.0
+        else:
+            y0 = (row_y_centers[row_idx - 1] + row_y_centers[row_idx]) / 2
+
+        if row_idx == len(rows) - 1:
+            y1 = height
+        else:
+            y1 = (row_y_centers[row_idx] + row_y_centers[row_idx + 1]) / 2
+
+        # Sort this row by x, separate lighting from non-lighting
+        row_lighting = sorted(
+            [t for t in row_titles if t in lighting_titles],
+            key=lambda t: t["x_center"],
+        )
+        row_non_lighting = sorted(
+            [t for t in row_titles if t in non_lighting_titles],
+            key=lambda t: t["x_center"],
+        )
+
+        if not row_lighting:
+            continue
+
+        # X boundaries — same logic as single-row viewports
+        rightmost_center = row_lighting[-1]["x_center"]
+        right_boundary = width
+        for nlt in row_non_lighting:
+            if nlt["x_center"] > rightmost_center:
+                right_boundary = (rightmost_center + nlt["x_center"]) / 2
+                break
+
+        # Left boundary from non-lighting to the left
+        leftmost_center = row_lighting[0]["x_center"]
+        left_boundary = 0.0
+        for nlt in reversed(row_non_lighting):
+            if nlt["x_center"] < leftmost_center:
+                left_boundary = (nlt["x_center"] + leftmost_center) / 2
+                break
+
+        for i, title in enumerate(row_lighting):
+            if i == 0:
+                x0 = left_boundary
+            else:
+                x0 = (row_lighting[i - 1]["x_center"] + title["x_center"]) / 2
+
+            if i == len(row_lighting) - 1:
+                x1 = right_boundary
+            else:
+                x1 = (title["x_center"] + row_lighting[i + 1]["x_center"]) / 2
+
+            label = _derive_label(title["text"])
+            viewports.append(Viewport(
+                label=label,
+                title=title["text"],
+                bbox=(x0, y0, x1, y1),
+                page_type=PageType.LIGHTING_PLAN,
+            ))
+
+    if viewports:
+        logger.info(
+            "Detected %d lighting viewports (grid layout) on %s: %s",
+            len(viewports),
+            page_info.sheet_code or f"page {page_info.page_number}",
+            [(v.label, f"bbox=({v.bbox[0]:.0f},{v.bbox[1]:.0f},"
+              f"{v.bbox[2]:.0f},{v.bbox[3]:.0f})") for v in viewports],
+        )
 
     return viewports
 

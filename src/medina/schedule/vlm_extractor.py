@@ -15,9 +15,10 @@ logger = logging.getLogger(__name__)
 
 _SCHEDULE_EXTRACTION_PROMPT = """\
 You are analyzing an electrical construction drawing page that contains a \
-LIGHT FIXTURE SCHEDULE table (also called a Luminaire Schedule).
+LIGHT FIXTURE SCHEDULE table (also called a Luminaire Schedule, Ceiling Fan \
+Schedule, or Fan Schedule).
 
-Your task is to extract EVERY fixture/luminaire row from the schedule table \
+Your task is to extract EVERY fixture/luminaire/fan row from the schedule table \
 into a structured JSON format.
 
 For EACH fixture row, extract these fields:
@@ -51,7 +52,7 @@ extract it into the appropriate field AND keep it in the description.
 - The "code" field is the short alphanumeric identifier (TYPE column), not a \
 long description.
 - Ignore any PANELBOARD schedules, PANEL schedules, or non-lighting tables.
-- Only extract from the LIGHT FIXTURE / LUMINAIRE schedule.
+- Extract from LIGHT FIXTURE / LUMINAIRE schedules AND CEILING FAN schedules.
 
 Return ONLY a JSON array of objects, no other text. Example:
 [
@@ -167,11 +168,11 @@ Look at this electrical construction drawing page. What type of schedule \
 table(s) does it contain?
 
 Answer with ONLY one of these categories:
-- "luminaire" — if it contains a LIGHT FIXTURE SCHEDULE or LUMINAIRE SCHEDULE
+- "luminaire" — if it contains a LIGHT FIXTURE SCHEDULE, LUMINAIRE SCHEDULE, or CEILING FAN SCHEDULE
 - "panel" — if it contains PANEL BOARD schedules, DISTRIBUTION BOARD schedules
 - "motor" — if it contains a MOTOR SCHEDULE
 - "other" — if it contains other types of schedules (mechanical, plumbing, etc.)
-- "mixed" — if it contains BOTH a luminaire schedule AND other schedule types
+- "mixed" — if it contains BOTH a luminaire/fan schedule AND other schedule types
 
 Reply with ONLY the single category word, nothing else.
 """
