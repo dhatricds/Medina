@@ -23,6 +23,7 @@ from medina.api.routes import (
     positions,
     processing,
     results,
+    reviews,
     sources,
     upload,
 )
@@ -121,6 +122,7 @@ app.include_router(feedback.router)
 app.include_router(fix_it.router)
 app.include_router(chat.router)
 app.include_router(params.router)
+app.include_router(reviews.router)
 
 
 @app.on_event("startup")

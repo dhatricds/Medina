@@ -188,3 +188,20 @@ export interface ChatResponse {
   needs_confirmation: boolean;
   highlight?: { fixture_code?: string; keynote_number?: string; plan?: string } | null;
 }
+
+export interface PlanReview {
+  sheet_code: string;
+  type: 'schedule' | 'lighting_plan';
+  status: 'not_reviewed' | 'reviewed';
+  reviewed_by: string | null;
+  reviewed_by_name: string | null;
+  reviewed_at: string | null;
+  corrections_count: number;
+}
+
+export interface ReviewsResponse {
+  project_id: string;
+  plans: PlanReview[];
+  reviewed: number;
+  total: number;
+}

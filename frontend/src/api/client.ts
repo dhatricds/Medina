@@ -1,4 +1,4 @@
-import type { ProjectData, Correction, DashboardProject, FixturePosition, FixtureFeedback, FixItAction, FixItInterpretation, ChatMsg, ChatResponse } from '../types';
+import type { ProjectData, Correction, DashboardProject, FixturePosition, FixtureFeedback, FixItAction, FixItInterpretation, ChatMsg, ChatResponse, ReviewsResponse } from '../types';
 
 const BASE = import.meta.env.VITE_API_URL ?? '';
 
@@ -260,6 +260,20 @@ export function confirmChatActions(projectId: string, actions: FixItAction[]): P
 
 export function getChatSuggestions(projectId: string): Promise<{ suggestions: string[] }> {
   return fetchJson(`/api/projects/${projectId}/chat/suggestions`);
+}
+
+// --- Reviews ---
+
+export function getReviews(projectId: string): Promise<ReviewsResponse> {
+  return fetchJson(`/api/projects/${projectId}/reviews`);
+}
+
+export function updateReview(
+  projectId: string,
+  sheetCode: string,
+  status: 'reviewed' | 'not_reviewed',
+): Promise<{ sheet_code: string; status: string }> {
+  return patchJson(`/api/projects/${projectId}/reviews/${encodeURIComponent(sheetCode)}`, { status });
 }
 
 // --- SSE URL ---

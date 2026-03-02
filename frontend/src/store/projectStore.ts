@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ProjectData, AgentInfo, AppState, Correction, DashboardProject, ViewMode, HighlightState, FixturePosition, FixtureFeedback } from '../types';
+import type { ProjectData, AgentInfo, AppState, Correction, DashboardProject, ViewMode, HighlightState, FixturePosition, FixtureFeedback, PlanReview } from '../types';
 import {
   loadDemoData,
   uploadFile,
@@ -21,6 +21,8 @@ import {
   getFeedback,
   removeFeedback,
   reprocessProject,
+  getReviews,
+  updateReview,
 } from '../api/client';
 import type { SourceItem } from '../api/client';
 
@@ -190,6 +192,12 @@ interface ProjectStore {
   /** Changed cells after reprocess: code → plan → oldCount. Only contains entries where count changed. */
   reprocessDiffs: Record<string, Record<string, number>>;
 
+  // Review state
+  reviewPlans: PlanReview[];
+  reviewedCount: number;
+  reviewTotal: number;
+  reviewSidebarOpen: boolean;
+
   // Dashboard state
   dashboardProjects: DashboardProject[];
   dashboardDetail: ProjectData | null;
@@ -256,6 +264,11 @@ interface ProjectStore {
   reprocessWithFeedback: () => Promise<void>;
   loadFeedback: (projectId: string) => Promise<void>;
 
+  // Review actions
+  loadReviews: (projectId: string) => Promise<void>;
+  togglePlanReview: (sheetCode: string) => Promise<void>;
+  setReviewSidebarOpen: (open: boolean) => void;
+
   // Correction summary
   getCorrectionSummary: () => ReturnType<typeof computeCorrectionSummary>;
 }
@@ -295,6 +308,12 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   // Reprocess diff tracking
   preReprocessData: null,
   reprocessDiffs: {},
+
+  // Review state
+  reviewPlans: [],
+  reviewedCount: 0,
+  reviewTotal: 0,
+  reviewSidebarOpen: false,
 
   // Dashboard state
   dashboardProjects: [],
@@ -414,8 +433,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         dashboardDetailId: null,
       });
 
-      // Load any existing feedback
+      // Load any existing feedback and reviews
       get().loadFeedback(project_id);
+      get().loadReviews(project_id);
     } catch (e: any) {
       const msg = e?.message || 'Failed to open project for editing';
       console.error('Failed to open dashboard project for editing:', e);
@@ -1027,8 +1047,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         preReprocessData: null,
         highlight: { ...emptyHighlight },
       });
-      // Load any existing feedback for this project
+      // Load any existing feedback and reviews for this project
       get().loadFeedback(projectId);
+      get().loadReviews(projectId);
     } catch (e) {
       set({ appState: 'error', error: `Failed to load results: ${e}` });
     }
@@ -1204,6 +1225,41 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }
   },
 
+  // Review actions
+  loadReviews: async (projectId: string) => {
+    try {
+      const data = await getReviews(projectId);
+      set({
+        reviewPlans: data.plans,
+        reviewedCount: data.reviewed,
+        reviewTotal: data.total,
+      });
+    } catch {
+      set({ reviewPlans: [], reviewedCount: 0, reviewTotal: 0 });
+    }
+  },
+
+  togglePlanReview: async (sheetCode: string) => {
+    const { projectId, reviewPlans } = get();
+    if (!projectId) return;
+    const plan = reviewPlans.find(p => p.sheet_code === sheetCode);
+    const newStatus = plan?.status === 'reviewed' ? 'not_reviewed' : 'reviewed';
+    try {
+      await updateReview(projectId, sheetCode, newStatus);
+      // Reload to get fresh state
+      const data = await getReviews(projectId);
+      set({
+        reviewPlans: data.plans,
+        reviewedCount: data.reviewed,
+        reviewTotal: data.total,
+      });
+    } catch (e) {
+      console.error('Failed to update review:', e);
+    }
+  },
+
+  setReviewSidebarOpen: (open: boolean) => set({ reviewSidebarOpen: open }),
+
   getCorrectionSummary: () => {
     const { originalProjectData, projectData } = get();
     return computeCorrectionSummary(originalProjectData, projectData);
@@ -1231,5 +1287,9 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     feedbackCount: 0,
     preReprocessData: null,
     reprocessDiffs: {},
+    reviewPlans: [],
+    reviewedCount: 0,
+    reviewTotal: 0,
+    reviewSidebarOpen: false,
   }),
 }));

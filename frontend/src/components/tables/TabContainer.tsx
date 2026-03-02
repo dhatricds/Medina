@@ -6,9 +6,10 @@ import AddFixtureModal from './AddFixtureModal';
 import AddKeynoteModal from './AddKeynoteModal';
 import ChatPanel from './ChatPanel';
 import FixItPanel from './FixItPanel';
+import ReviewSidebar from './ReviewSidebar';
 
 export default function TabContainer() {
-  const { activeTab, setActiveTab, projectData, editCount, recalcTotals, projectId, appState, error, feedbackCount, addFixtureFeedback, chatOpen, setChatOpen, fixItOpen, setFixItOpen } = useProjectStore();
+  const { activeTab, setActiveTab, projectData, editCount, recalcTotals, projectId, appState, error, feedbackCount, addFixtureFeedback, chatOpen, setChatOpen, fixItOpen, setFixItOpen, reviewSidebarOpen, setReviewSidebarOpen, reviewedCount, reviewTotal } = useProjectStore();
   const [showAddModal, setShowAddModal] = useState(false);
   const [showAddKeynoteModal, setShowAddKeynoteModal] = useState(false);
 
@@ -207,6 +208,29 @@ export default function TabContainer() {
         </div>
         <div className="flex items-center gap-2">
           <button
+            className={`px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer transition-all flex items-center gap-1 ${
+              reviewSidebarOpen
+                ? 'bg-green-600 text-white'
+                : 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-100'
+            }`}
+            onClick={() => setReviewSidebarOpen(!reviewSidebarOpen)}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M9 11l3 3L22 4" />
+              <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" />
+            </svg>
+            Review
+            {reviewTotal > 0 && (
+              <span className={`text-[9px] px-1 py-px rounded-full font-medium ${
+                reviewedCount === reviewTotal
+                  ? 'bg-green-200 text-green-800'
+                  : 'bg-green-100 text-green-700'
+              }`}>
+                {reviewedCount}/{reviewTotal}
+              </span>
+            )}
+          </button>
+          <button
             className="px-3 py-1.5 rounded-md text-xs font-semibold bg-white text-text-main border border-border hover:bg-bg cursor-pointer transition-all"
             onClick={recalcTotals}
           >
@@ -214,6 +238,9 @@ export default function TabContainer() {
           </button>
         </div>
       </div>
+
+      {/* Review Sidebar */}
+      {appState === 'complete' && <ReviewSidebar />}
 
       {/* Chat Panel — kept mounted to preserve state */}
       {appState === 'complete' && <div className={chatOpen ? '' : 'hidden'}><ChatPanel /></div>}
